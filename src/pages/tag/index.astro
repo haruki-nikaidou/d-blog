@@ -12,9 +12,9 @@ const posts = (await getCollection('blog')).filter((post) => !post.data.draft);
 const tags = Array.from(new Set(posts.flatMap((post) => post.data.tags))).sort();
 ---
 
-<RootLayout title={`Tags | ${SITE_TITLE}`} description={SITE_DESCRIPTION} robots="noindex,follow">
+<RootLayout title={`タグ | ${SITE_TITLE}`} description={SITE_DESCRIPTION} robots="noindex,follow">
   <Card class="tags-card">
-    <h2>Tags</h2>
+    <h2>タグ</h2>
     <TagList tags={tags} />
   </Card>
 </RootLayout>

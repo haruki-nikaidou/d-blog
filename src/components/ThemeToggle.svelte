@@ -27,7 +27,7 @@
 <button
     onclick={toggleTheme}
     class="button-light-primary md dark-mode-switch"
-    aria-label={isDark ? "Change to light mode" : "Change to dark mode"}
+    aria-label={isDark ? "ライトモードに切り替える" : "ダークモードに切り替える"}
 >
     {#if isDark}
         <Icon icon="mingcute:sun-fill" width={20} height={20} />

@@ -35,12 +35,12 @@ const {slug, heroImageId, title, pubDate, updatedDate, tags} = Astro.props
     <TagList tags={tags} />
     <div class="date-container">
         <p class="date">
-            {updatedDate && "Published at "}{pubDate.toLocaleDateString()}
+            {updatedDate && "公開日: "}{pubDate.toLocaleDateString("ja-JP")}
         </p>
         {
             updatedDate && (
                 <p class="date">
-                    Updated at: {updatedDate.toLocaleDateString()}
+                    更新日: {updatedDate.toLocaleDateString("ja-JP")}
                 </p>
             )
         }

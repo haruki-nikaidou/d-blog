@@ -47,12 +47,12 @@ const {
       </h1>
       <div class="meta">
         <div class="meta-badges">
-          {draft && <span class="badge">Draft</span>}
-          <span class="badge">Published: {pubDate.toLocaleDateString()}</span>
+          {draft && <span class="badge">下書き</span>}
+          <span class="badge">公開: {pubDate.toLocaleDateString("ja-JP")}</span>
           {
             updatedDate && (
               <span class="badge">
-                Updated: {updatedDate.toLocaleDateString()}
+                更新: {updatedDate.toLocaleDateString("ja-JP")}
               </span>
             )
           }
@@ -67,35 +67,34 @@ const {
   <Card class="footer-card">
     <article>
       <p class="meta-text">
-        This article is licensed under <a
+        この記事は <a
           href="https://creativecommons.org/licenses/by-nc-sa/4.0/"
           >CC BY-NC-SA 4.0</a
-        >.
+        > の下でライセンスされています。
       </p>
       {
         heroImageOwned && (
           <p class="meta-text">
-            Hero image is by blog author. All rights reserved.
+            ヒーロー画像はブログ著者によるものです。無断転載を禁じます。
           </p>
         )
       }
       {
         !heroImageOwned && heroImageAuthor && heroImageSource && (
           <p class="meta-text">
-            Hero image by{" "}
+            ヒーロー画像は{" "}
             {heroImageAuthorUrl ? (
               <a href={heroImageAuthorUrl}>{heroImageAuthor}</a>
             ) : (
               heroImageAuthor
             )}
-            on{" "}
+            （{" "}
             {heroImageSourceUrl ? (
               <a href={heroImageSourceUrl}>{heroImageSource}</a>
             ) : (
               heroImageSource
             )}
-            . The hero image is <strong>not</strong> covered by the above
-            license. All rights belong to the original author.
+            ）によるものです。この画像は上記のライセンスの<strong>対象外</strong>であり、すべての権利は原作者に帰属します。
           </p>
         )
       }

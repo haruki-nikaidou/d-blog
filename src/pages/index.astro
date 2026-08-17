@@ -27,7 +27,7 @@ const posts = (await getCollection("blog"))
             </p>
             <div>
                 <p>
-                    <strong> Contact me: </strong>
+                    <strong> 連絡先： </strong>
                 </p>
                 <div id="contact">
                     <a
@@ -83,7 +83,7 @@ const posts = (await getCollection("blog"))
     </Card>
 
     <Card>
-        <h3>Pinned Posts</h3>
+        <h3>固定された記事</h3>
     </Card>
     <section id="pinned-container">
         {posts.map((post) => <PostCard {...post.data} slug={post.id} />)}
