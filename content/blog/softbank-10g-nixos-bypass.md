@@ -12,6 +12,8 @@ heroImageAuthor: 'Tinia'
 heroImageAuthorUrl: 'https://www.pixiv.net/users/16148853'
 ---
 
+> この記事は、<https://blog.plr.moe/blog/softbank-10g-nixos-bypass>から翻訳したものである。
+
 *以下に登場する個人のアドレス・プレフィックス・MAC はすべて伏せてあります。プレースホルダは `X` または山括弧で示しています。*
 
 ## TL;DR

@@ -13,6 +13,8 @@ heroImageAuthorUrl: 'https://www.pixiv.net/users/10950860'
 pinned: true
 ---
 
+> この記事は、<https://blog.plr.moe/blog/transaction-in-event-driven-system>から翻訳したものである。
+
 ## 問題: 信頼できるイベント発行は難しい
 
 分散システムでは、イベントを確実に発行することは見た目以上に難しい課題です。次の2つをアトミックに行う必要があります。
