@@ -1,9 +1,9 @@
 ---
-title: "A Hybrid Transactional Outbox Event Delivery Pattern"
-description: 'This article presents a hybrid event delivery pattern that uses three specialized tables to handle different event delivery requirements: eager publishing with fallback scanning for latency-sensitive events, scheduled polling for time-based events, and batch aggregation for high-volume data.'
+title: "ハイブリッドなトランザクショナル・アウトボックス方式のイベント配信パターン"
+description: '本記事では、3つの専用テーブルを用いて異なるイベント配信要件に対応するハイブリッドなイベント配信パターンを紹介します。レイテンシに敏感なイベントにはフォールバックのスキャンを伴う即時発行、時刻ベースのイベントには定期ポーリング、大量データにはバッチ集約を用います。'
 tags:
-  - Distributed System
-  - Coding
+  - 分散システム
+  - プログラミング
 pubDate: 'Oct 5 2025'
 heroImageId: '14627615-0daa-4380-1161-88c270934400'
 heroImageSource: 'Pixiv'
@@ -13,75 +13,75 @@ heroImageAuthorUrl: 'https://www.pixiv.net/users/10950860'
 pinned: true
 ---
 
-## The Problem: Reliable Event Publishing is Hard
+## 問題: 信頼できるイベント発行は難しい
 
-In distributed systems, publishing events reliably is deceptively difficult. You need to atomically:
-1. Update your database
-2. Publish an event to a message queue
+分散システムでは、イベントを確実に発行することは見た目以上に難しい課題です。次の2つをアトミックに行う必要があります。
+1. データベースを更新する
+2. メッセージキューにイベントを発行する
 
-But these are two separate systems. What happens when your database transaction succeeds but the message queue is down? You lose events. What if the message publishes but the database rolls back? You get phantom events.
+しかし、これらは2つの別々のシステムです。データベースのトランザクションは成功したのにメッセージキューがダウンしていたら、どうなるでしょうか？イベントを失います。逆にメッセージは発行されたのにデータベースがロールバックしたら？幻のイベント (phantom event) が生まれます。
 
-This is the **dual-write problem**, and it's the bane of event-driven architectures.
+これが **二重書き込み問題 (dual-write problem)** であり、イベント駆動アーキテクチャの悩みの種です。
 
-## Transactional Outbox
+## トランザクショナル・アウトボックス
 
-The [Transactional Outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html) solves this by:
-1. Writing events to an outbox table within the same database transaction
-2. A separate process reads the outbox and publishes to the message queue
-3. Events are marked as published after successful delivery
+[トランザクショナル・アウトボックスパターン](https://microservices.io/patterns/data/transactional-outbox.html) は、次の方法でこれを解決します。
+1. 同一のデータベーストランザクション内で、イベントをアウトボックステーブルに書き込む
+2. 別プロセスがアウトボックスを読み取り、メッセージキューに発行する
+3. 配信に成功したイベントを発行済みとしてマークする
 
-This works, but it comes with trade-offs:
-- **Polling adds latency**: Checking the database every few seconds delays event delivery
-- **Change Data Capture is complex**: Real-time CDC solutions like Debezium are powerful but add operational overhead
-- **Large payloads in MQ**: Full event data flows through the message queue
+これは機能しますが、トレードオフがあります。
+- **ポーリングはレイテンシを増やす**: 数秒ごとにデータベースを確認するため、イベント配信が遅延します
+- **Change Data Capture は複雑**: Debezium のようなリアルタイム CDC ソリューションは強力ですが、運用上のオーバーヘッドが増えます
+- **MQ を流れる大きなペイロード**: イベントデータ全体がメッセージキューを通過します
 
-## Real-World Example: Multi-Provider AI Chat Platform
+## 実例: マルチプロバイダ対応の AI チャットプラットフォーム
 
-Let's ground this in a concrete example: building a chat platform that supports multiple AI providers (OpenAI, Anthropic, Google, etc.). This system needs to handle:
+具体例で考えてみましょう。複数の AI プロバイダ (OpenAI、Anthropic、Google など) に対応するチャットプラットフォームを構築するとします。このシステムは次を扱う必要があります。
 
-- User subscriptions that **expire at specific times**
-- **Token usage tracking** across millions of API calls
-- **Payment processing** that triggers service activation
-- AI responses cached in Redis that need eventual **persistence**
+- **特定の時刻に失効する**ユーザーのサブスクリプション
+- 数百万回の API 呼び出しにわたる**トークン使用量の追跡**
+- サービス有効化を引き起こす**決済処理**
+- Redis にキャッシュされ、最終的に**永続化**が必要な AI 応答
 
-Each of these has different consistency and latency requirements, making it a perfect case study for our hybrid pattern.
+これらはそれぞれ異なる一貫性とレイテンシの要件を持っており、私たちのハイブリッドパターンにとって格好のケーススタディとなります。
 
-## A Better Approach: Hybrid Outbox with Claim Check and Buffer
+## より良いアプローチ: Claim Check とバッファを備えたハイブリッドアウトボックス
 
-I implemented a pattern that separates different delivery mechanisms into dedicated tables. The key insight: different event types have different requirements and should use optimized storage.
+私は、異なる配信メカニズムを専用テーブルに分離するパターンを実装しました。核心となる洞察は、イベントの種類ごとに要件が異なり、それぞれ最適化されたストレージを使うべきだ、ということです。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      AI Chat Service                        │
+│                     AIチャットサービス                      │
 └───┬─────────────────┬─────────────────┬─────────────────────┘
     │                 │                 │
-    │ 1. Eager Event  │ 2. Schedule     │ 3. Accumulate
-    │                 │ Future Event    │ High Volume
+    │ 1. 即時イベント │ 2. 将来の       │ 3. 大量データ
+    │                 │ イベントを予約  │ を蓄積
     ▼                 ▼                 ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Three Specialized Tables                       │
+│                      3つの専用テーブル                      │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ outbox_events: Hybrid (AI Response, Payments)         │  │
-│  │   → Eager publish + 30s scanner fallback              │  │
-│  │   → Index: (status, created_at) for fast scanning     │  │
-│  │   → Cleanup: Archive after 30 days                    │  │
+│  │ outbox_events: ハイブリッド (AI応答, 決済)            │  │
+│  │   → 即時発行 + 30秒ごとのスキャナfallback             │  │
+│  │   → インデックス: (status, created_at) で高速スキャン │  │
+│  │   → クリーンアップ: 30日後にアーカイブ                │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ scheduled_events: Future triggers (Subscriptions)     │  │
-│  │   → Poll for scheduled_at <= NOW()                    │  │
-│  │   → Index: (scheduled_at, status) for time queries    │  │
-│  │   → Cleanup: Delete after execution                   │  │
+│  │ scheduled_events: 将来のトリガー (サブスク)           │  │
+│  │   → scheduled_at <= NOW() をポーリング                │  │
+│  │   → インデックス: (scheduled_at, status) で時刻検索   │  │
+│  │   → クリーンアップ: 実行後に削除                      │  │
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │ accumulation_buffer: Batching (Token Usage)           │  │
-│  │   → No MQ, direct aggregation every 5 minutes         │  │
-│  │   → Index: (user_id, created_at) for grouping         │  │
-│  │   → Cleanup: Delete immediately after aggregation     │  │
+│  │ accumulation_buffer: バッチ処理 (トークン使用量)      │  │
+│  │   → MQ不要、5分ごとに直接集約                         │  │
+│  │   → インデックス: (user_id, created_at) でグループ化  │  │
+│  │   → クリーンアップ: 集約後に即削除                    │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
                           │
-                          │ { event_id: UUID or series }
+                          │ { event_id: UUID または series }
                           │
                           ▼
                     ┌──────────┐
@@ -94,27 +94,27 @@ I implemented a pattern that separates different delivery mechanisms into dedica
                     └──────────┘
 ```
 
-Even in the worst case (MQ failure, process crash, network partition), all events eventually get processed. The database transaction ensures events are never lost.
+最悪のケース (MQ 障害、プロセスクラッシュ、ネットワーク分断) でも、すべてのイベントは最終的に処理されます。データベースのトランザクションが、イベントが決して失われないことを保証します。
 
-Since consumers fetch events by ID and check status, duplicate deliveries are naturally handled. This is critical when the scanner republishes events that were actually already sent.
+コンシューマは ID でイベントを取得しステータスを確認するため、重複配信は自然に処理されます。これは、実際にはすでに送信済みのイベントをスキャナが再発行してしまう場合に重要です。
 
-And, since there is no need for complex CDC infrastructure, maintenance is quite easy.
+また、複雑な CDC インフラが不要なため、メンテナンスは非常に容易です。
 
-The key insight is **different event types need different storage strategies**.
+核心となる洞察は、**イベントの種類ごとに異なるストレージ戦略が必要である**という点です。
 
-**database schema design decisions:**
-- `outbox_events`: No `scheduled_at` column (not needed)
-- `scheduled_events`: Requires `scheduled_at` for future triggers
-- `accumulation_buffer`: Minimal schema, uses `BIGSERIAL` for fast inserts, no status field needed. Just delete it after processing instead.
+**データベーススキーマの設計判断:**
+- `outbox_events`: `scheduled_at` カラムは不要 (必要ない)
+- `scheduled_events`: 将来のトリガーのために `scheduled_at` が必要
+- `accumulation_buffer`: 最小限のスキーマ。高速な挿入のために `BIGSERIAL` を使い、ステータスフィールドは不要。処理後に削除するだけでよい。
 
-### Hybrid Events (Hot Path): AI Response Persistence
+### ハイブリッドイベント (ホットパス): AI 応答の永続化
 
-When a user sends a message, the AI response is initially cached in Redis for instant retrieval. We need to persist it to PostgreSQL for:
-- Long-term storage and search
-- Analytics and training data
-- Audit trails
+ユーザーがメッセージを送信すると、AI の応答はまず即時取得のために Redis にキャッシュされます。これを次の目的で PostgreSQL に永続化する必要があります。
+- 長期保存と検索
+- 分析および学習データ
+- 監査証跡
 
-This is **latency-sensitive** but not critical. If eager publish fails, a 30-second delay is acceptable.
+これは**レイテンシに敏感**ですが、致命的ではありません。即時発行が失敗しても、30秒の遅延は許容できます。
 
 ```rust
 async fn save_ai_response(
@@ -123,7 +123,7 @@ async fn save_ai_response(
     response: AiResponse,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    // do something here, then publish the event
+    // ここで何か処理をしてからイベントを発行する
     let event = sqlx::query_as!(
         OutboxEvent,
         r#"
@@ -139,13 +139,13 @@ async fn save_ai_response(
     .await?;
     tx.commit().await?;
     
-    // Eager publish after the commit (non-blocking)
+    // コミット後に即時発行 (ノンブロッキング)
     let event_id = event.id;
     let mq = mq.clone();
     tokio::spawn(async move {
         if let Err(e) = eager_publish(&mq, event_id).await {
-            tracing::warn!("Eager publish failed for AI response: {:?}", e);
-            // Scanner will catch it within 30 seconds
+            tracing::warn!("AI応答の即時発行に失敗: {:?}", e);
+            // スキャナが30秒以内に拾う
         }
     });
     
@@ -153,11 +153,11 @@ async fn save_ai_response(
 }
 ```
 
-**Why hybrid here?** Most AI responses need quick persistence for analytics dashboards showing real-time usage. The eager publish ensures sub-second latency 99% of the time, while the scanner guarantees eventual consistency.
+**なぜここでハイブリッドなのか？** ほとんどの AI 応答は、リアルタイムの使用状況を表示する分析ダッシュボードのために迅速な永続化を必要とします。即時発行は 99% のケースで1秒未満のレイテンシを実現し、スキャナが結果整合性を保証します。
 
-### Scheduled Events (Cold Path): Subscription Expiry
+### 予約イベント (コールドパス): サブスクリプションの失効
 
-Subscriptions expire at known future times. There's **no need for eager publishing**—just poll for due events.
+サブスクリプションは既知の将来時刻に失効します。**即時発行は不要**で、期限が来たイベントをポーリングするだけで十分です。
 
 ```rust
 async fn create_subscription(
@@ -170,7 +170,7 @@ async fn create_subscription(
     
     let expires_at = Utc::now() + Duration::days(duration_days as i64);
     
-    // Create subscription
+    // サブスクリプションを作成
     let subscription = sqlx::query_as!(
         Subscription,
         "INSERT INTO subscriptions (user_id, plan, expires_at, status)
@@ -184,7 +184,7 @@ async fn create_subscription(
     .fetch_one(&mut *tx)
     .await?;
     
-    // Schedule expiry event in dedicated table
+    // 専用テーブルに失効イベントを予約
     sqlx::query!(
         r#"
         INSERT INTO scheduled_events (event_type, payload, scheduled_at, status)
@@ -203,7 +203,7 @@ async fn create_subscription(
     Ok(subscription)
 }
 
-// Scanner runs every minute, checks for due subscriptions
+// スキャナは毎分実行され、期限切れのサブスクをチェックする
 async fn scan_scheduled_events(pool: &PgPool, mq: &MessageQueue) -> Result<()> {
     let now = Utc::now();
     
@@ -229,7 +229,7 @@ async fn scan_scheduled_events(pool: &PgPool, mq: &MessageQueue) -> Result<()> {
     Ok(())
 }
 
-// Consumer: Handle subscription expiry
+// コンシューマ: サブスク失効を処理
 async fn handle_subscription_expiry(
     pool: &PgPool,
     event: OutboxEvent,
@@ -237,7 +237,7 @@ async fn handle_subscription_expiry(
     let payload: EventPayload = serde_json::from_value(event.payload)?;
     
     if let EventPayload::SubscriptionExpiry { subscription_id, user_id } = payload {
-        // Update subscription status
+        // サブスクリプションのステータスを更新
         sqlx::query!(
             "UPDATE subscriptions SET status = $1 WHERE id = $2",
             SubscriptionStatus::Expired as SubscriptionStatus,
@@ -246,10 +246,10 @@ async fn handle_subscription_expiry(
         .execute(pool)
         .await?;
         
-        // Revoke API access
+        // API アクセスを取り消す
         revoke_api_keys(user_id).await?;
         
-        // Send notification email
+        // 通知メールを送信
         send_expiry_notification(user_id).await?;
     }
     
@@ -257,16 +257,16 @@ async fn handle_subscription_expiry(
 }
 ```
 
-**Why schedule-only?** Subscription expiry is **never urgent**. Whether it happens at exactly midnight or 60 seconds later doesn't matter. Polling every minute is sufficient, and we avoid the complexity of eager publishing entirely.
+**なぜ予約のみなのか？** サブスクリプションの失効は**決して緊急ではありません**。ちょうど深夜0時に起きようが60秒後になろうが問題になりません。毎分のポーリングで十分であり、即時発行の複雑さを完全に回避できます。
 
-### Poll-Only Events (No MQ): Token Usage Accumulation
+### ポーリングのみのイベント (MQ なし): トークン使用量の集約
 
-Every AI API call generates token usage. Tracking this in real-time would overwhelm the system with millions of events per day. Instead, we **accumulate usage locally and batch-update periodically**.
+AI API を呼び出すたびにトークン使用量が発生します。これをリアルタイムで追跡すると、1日あたり数百万件のイベントでシステムが圧迫されてしまいます。代わりに、**使用量をローカルに蓄積し、定期的にバッチ更新**します。
 
 ```rust
-// Background job runs every 5 minutes
+// バックグラウンドジョブは5分ごとに実行される
 async fn accumulate_token_usage(pool: &PgPool) -> Result<()> {
-    // Find all pending token usage from accumulation buffer
+    // accumulation buffer から未処理のトークン使用量をすべて取得
     let usage_records = sqlx::query!(
         r#"
         SELECT id, user_id, tokens, model, created_at
@@ -281,19 +281,19 @@ async fn accumulate_token_usage(pool: &PgPool) -> Result<()> {
         return Ok(());
     }
     
-    // Group by user_id and sum tokens
+    // user_id でグループ化しトークンを合計
     let mut usage_by_user: HashMap<Uuid, i32> = HashMap::new();
     for record in &usage_records {
         *usage_by_user.entry(record.user_id).or_insert(0) += record.tokens;
     }
     
-    // Batch update user quotas
+    // ユーザーのクォータを一括更新
     let mut tx = pool.begin().await?;
-    // do something here
+    // ここで何か処理をする
     tx.commit().await?;
     
     tracing::info!(
-        "Accumulated {} token usage records for {} users",
+        "{} 件のトークン使用量レコードを {} 人のユーザー分集約しました",
         usage_records.len(),
         usage_by_user.len()
     );
@@ -301,169 +301,169 @@ async fn accumulate_token_usage(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-// Run accumulator periodically
+// アキュムレータを定期的に実行
 async fn run_token_accumulator(pool: PgPool) {
-    let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
+    let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5分
     
     loop {
         interval.tick().await;
         
         if let Err(e) = accumulate_token_usage(&pool).await {
-            tracing::error!("Token accumulator error: {:?}", e);
+            tracing::error!("トークンアキュムレータのエラー: {:?}", e);
         }
     }
 }
 ```
 
-**Why poll-only?** Token usage tracking is:
-- **Not latency-sensitive**: Users check their quota in dashboards, not real-time
-- **High volume**: Millions of tiny events per day
-- **Naturally batched**: Accumulating every 5 minutes is perfectly fine
+**なぜポーリングのみなのか？** トークン使用量の追跡には次の特徴があります。
+- **レイテンシに敏感でない**: ユーザーはダッシュボードでクォータを確認するのであって、リアルタイムではない
+- **大量**: 1日あたり数百万件の小さなイベント
+- **自然にバッチ化できる**: 5分ごとの蓄積でまったく問題ない
 
-Using MQ here would be wasteful. The `accumulation_buffer` table acts as a **simple batching mechanism**, and periodic polling aggregates efficiently.
+ここで MQ を使うのは無駄です。`accumulation_buffer` テーブルは**シンプルなバッチ処理の仕組み**として機能し、定期ポーリングによって効率的に集約されます。
 
-### Choose the Right Tool
+### 適切なツールを選ぶ
 
 ```txt
-Should this event use outbox_events, scheduled_events, or accumulation_buffer?
+このイベントは outbox_events、scheduled_events、accumulation_buffer のどれを使うべきか？
 
-├─ Known future execution time? 
+├─ 実行時刻が既知の将来イベントか？
 │  └─ YES → scheduled_events
 │  
-├─ High volume (>1000/sec) + aggregatable?
+├─ 大量 (>1000/秒) かつ集約可能か？
 │  └─ YES → accumulation_buffer
 │  
-└─ Needs low latency delivery?
-   ├─ YES → outbox_events (hybrid)
-   └─ NO → classic_outbox (poll-only)
+└─ 低レイテンシ配信が必要か？
+   ├─ YES → outbox_events (ハイブリッド)
+   └─ NO → classic_outbox (ポーリングのみ)
 ```
 
-| Use Case | Table | Pattern | Latency | Why |
+| ユースケース | テーブル | パターン | レイテンシ | 理由 |
 |----------|-------|---------|---------|-----|
-| AI Response Sync | `outbox_events` | Hybrid (eager + scanner) | <1s (99%), <30s (99.99%) | User-facing analytics need speed |
-| Payment Processing | `outbox_events` | Hybrid (eager + scanner) | <1s (99%), <30s (99.99%) | Service activation should be quick |
-| Subscription Expiry | `scheduled_events` | Scheduled (poll-only) | ~60s | Exact timing doesn't matter |
-| Token Usage | `accumulation_buffer` | Poll-only (no MQ) | ~5 min | High volume, not time-sensitive |
+| AI 応答の同期 | `outbox_events` | ハイブリッド (即時 + スキャナ) | <1秒 (99%)、<30秒 (99.99%) | ユーザー向け分析には速度が必要 |
+| 決済処理 | `outbox_events` | ハイブリッド (即時 + スキャナ) | <1秒 (99%)、<30秒 (99.99%) | サービス有効化は迅速であるべき |
+| サブスクリプションの失効 | `scheduled_events` | 予約 (ポーリングのみ) | 約60秒 | 正確なタイミングは重要でない |
+| トークン使用量 | `accumulation_buffer` | ポーリングのみ (MQ なし) | 約5分 | 大量で、時間にシビアでない |
 
-## Why and Why Not
+## 採用する理由・しない理由
 
-### Why Not One Table?
+### なぜ1つのテーブルにしないのか？
 
-Using three dedicated tables provides significant architectural benefits that a single unified table cannot match:
+3つの専用テーブルを使うことで、単一の統合テーブルでは得られない大きなアーキテクチャ上の利点が得られます。
 
-**1. Optimized Indexes**
-- `outbox_events`: Index on `(status, created_at)` for fast scanning of recent failures
-- `scheduled_events`: Index on `(scheduled_at, status)` for efficient time-based queries
-- `accumulation_buffer`: Index on `(user_id, created_at)` for fast grouping during aggregation
+**1. 最適化されたインデックス**
+- `outbox_events`: 直近の失敗を高速にスキャンするための `(status, created_at)` インデックス
+- `scheduled_events`: 効率的な時刻ベースのクエリのための `(scheduled_at, status)` インデックス
+- `accumulation_buffer`: 集約時の高速なグループ化のための `(user_id, created_at)` インデックス
 
-A single table would require multiple indexes covering different access patterns, causing index bloat and slower writes.
+単一のテーブルでは、異なるアクセスパターンをカバーする複数のインデックスが必要となり、インデックスの肥大化と書き込みの低速化を招きます。
 
-**2. Independent Cleanup Strategies**
-- `outbox_events`: Archive after 30 days (audit trail)
-- `scheduled_events`: Delete immediately after execution (no historical value)
-- `accumulation_buffer`: Delete after aggregation (already in `users.tokens_used`)
+**2. 独立したクリーンアップ戦略**
+- `outbox_events`: 30日後にアーカイブ (監査証跡)
+- `scheduled_events`: 実行後すぐに削除 (履歴的価値なし)
+- `accumulation_buffer`: 集約後に削除 (すでに `users.tokens_used` に反映済み)
 
-This prevents the table from growing indefinitely and keeps query performance consistent.
+これにより、テーブルが無限に肥大化するのを防ぎ、クエリ性能を一定に保てます。
 
-**3. Isolated Performance Characteristics**
-- High-volume token usage writes don't block latency-sensitive AI response events
-- Scheduled event scans don't interfere with outbox scanner performance
-- Each table can be tuned independently (vacuum settings, autovacuum thresholds)
+**3. 分離されたパフォーマンス特性**
+- 大量のトークン使用量の書き込みが、レイテンシに敏感な AI 応答イベントをブロックしない
+- 予約イベントのスキャンが、アウトボックススキャナの性能に干渉しない
+- 各テーブルを個別にチューニングできる (vacuum 設定、autovacuum の閾値)
 
-**4. Clear Operational Boundaries**
-Different teams or services can own different tables:
-- Payment team: `outbox_events` (critical path)
-- Subscription team: `scheduled_events` (background jobs)
-- Analytics team: `accumulation_buffer` (data pipeline)
+**4. 明確な運用上の境界**
+異なるチームやサービスが異なるテーブルを所有できます。
+- 決済チーム: `outbox_events` (クリティカルパス)
+- サブスクリプションチーム: `scheduled_events` (バックグラウンドジョブ)
+- 分析チーム: `accumulation_buffer` (データパイプライン)
 
-### Why Only Pass the Event ID?
+### なぜイベント ID だけを渡すのか？
 
-By only publishing event IDs to the message queue instead of full payloads (also known as [claim check](https://learn.microsoft.com/en-us/azure/architecture/patterns/claim-check)), we gain several advantages:
+ペイロード全体ではなくイベント ID だけをメッセージキューに発行すること (別名 [claim check](https://learn.microsoft.com/en-us/azure/architecture/patterns/claim-check)) で、いくつかの利点が得られます。
 
-**1. Reduced Message Queue Load**
-- Tiny messages (just a UUID) vs potentially large event payloads
-- Lower network bandwidth usage between MQ and consumers
-- MQ can handle significantly higher throughput with smaller messages
+**1. メッセージキューの負荷軽減**
+- 巨大になりうるイベントペイロードに対し、(UUID だけの) 極小メッセージ
+- MQ とコンシューマ間のネットワーク帯域使用量が減る
+- 小さなメッセージにより、MQ は大幅に高いスループットを処理できる
 
-**2. Avoids Message Size Limits**
-- Most message queues have size limits (e.g., RabbitMQ 128MB default, SQS 256KB)
-- AI responses with embeddings or large context can exceed these limits
-- Event payloads are unlimited in PostgreSQL
+**2. メッセージサイズ制限の回避**
+- ほとんどのメッセージキューにはサイズ制限がある (例: RabbitMQ はデフォルト 128MB、SQS は 256KB)
+- 埋め込みや大きなコンテキストを含む AI 応答は、これらの制限を超えることがある
+- PostgreSQL ではイベントペイロードのサイズは無制限
 
-**3. Single Source of Truth**
-- Event data lives only in the database, not duplicated in MQ
-- Updates to event processing logic can query the latest data
-- No stale payload issues when consumers are slow
+**3. 信頼できる唯一の情報源 (Single Source of Truth)**
+- イベントデータはデータベースにのみ存在し、MQ に複製されない
+- イベント処理ロジックを更新しても、常に最新のデータを問い合わせられる
+- コンシューマが遅い場合でも、古いペイロードの問題が起きない
 
-**4. Better Resource Utilization**
-- Database optimized for storing structured data with indexes
-- Message queue optimized for fast delivery, not storage
-- Each system does what it's best at
+**4. より良いリソース活用**
+- データベースはインデックス付きの構造化データの保存に最適化されている
+- メッセージキューは保存ではなく高速な配信に最適化されている
+- 各システムが最も得意なことを行う
 
-**5. Simplified Debugging**
-- Query database directly to inspect event details
-- No need to capture messages from MQ for investigation
-- Event history preserved independently of MQ retention
+**5. デバッグの簡素化**
+- イベントの詳細を確認するにはデータベースを直接クエリすればよい
+- 調査のために MQ からメッセージをキャプチャする必要がない
+- イベント履歴が MQ の保持期間とは独立して保存される
 
-The trade-off is an additional database query per event in the consumer, but for our use case with thousands (not millions) of events per second, this is negligible compared to the benefits.
+トレードオフは、コンシューマ側でイベントごとにデータベースクエリが1回増えることですが、毎秒 (数百万ではなく) 数千件というこのユースケースでは、利点に比べれば無視できる程度です。
 
-## Trade-offs and Considerations
+## トレードオフと考慮事項
 
-### Potential Duplicate Deliveries
-If eager publishing succeeds but updating the status fails, the scanner will republish. Your consumers **must be idempotent**. For the AI chat platform:
-- AI response sync: Check if `content` is already set before updating
-- Payment processing: Use payment gateway's idempotency keys
-- Token accumulation: Naturally idempotent (already aggregated by ID)
+### 重複配信の可能性
+即時発行は成功したがステータスの更新に失敗した場合、スキャナが再発行します。コンシューマは**冪等でなければなりません**。AI チャットプラットフォームの場合:
+- AI 応答の同期: 更新前に `content` がすでに設定されているか確認する
+- 決済処理: 決済ゲートウェイの冪等キーを使う
+- トークンの集約: 本質的に冪等 (ID ごとにすでに集約されている)
 
-### Additional Database Load
-Every hybrid consumer must query the database to fetch event details. For high throughput:
-- Use read replicas for consumer queries
-- Add connection pooling (e.g., pgBouncer)
-- Cache frequently accessed events in Redis
+### データベース負荷の増加
+ハイブリッドなコンシューマはすべて、イベントの詳細を取得するためにデータベースをクエリする必要があります。高スループットの場合:
+- コンシューマのクエリにはリードレプリカを使う
+- コネクションプーリングを追加する (例: pgBouncer)
+- 頻繁にアクセスされるイベントを Redis にキャッシュする
 
-**What three tables helps here:**
-- Each table is smaller = better cache hit rates
-- Scanners don't compete on the same indexes
-- Write-heavy `accumulation_buffer` doesn't block reads on `outbox_events`
+**ここで3テーブル構成が役立つ点:**
+- 各テーブルが小さい = キャッシュヒット率が向上する
+- スキャナ同士が同じインデックスを奪い合わない
+- 書き込みの多い `accumulation_buffer` が `outbox_events` の読み取りをブロックしない
 
-### Event Cleanup Strategy
-Each table has its own cleanup strategy based on its purpose:
+### イベントのクリーンアップ戦略
+各テーブルは、その目的に応じた独自のクリーンアップ戦略を持ちます。
 
-- Cleanup for outbox_events: Archive after 30 days (audit trail)
-- Cleanup for scheduled_events: Delete immediately after execution
-- Cleanup for accumulation_buffer: Delete after aggregation (see above). This happens inline during the accumulation process.
+- outbox_events のクリーンアップ: 30日後にアーカイブ (監査証跡)
+- scheduled_events のクリーンアップ: 実行後すぐに削除
+- accumulation_buffer のクリーンアップ: 集約後に削除 (前述)。これは集約処理の中でインラインに行われます。
 
-**Benefits of table-specific cleanup:**
-- No "one size fits all" retention policy compromises
-- Smaller tables = faster queries and better vacuum performance
-- Clear data lifecycle management per use case
+**テーブルごとのクリーンアップの利点:**
+- 「万能な」保持ポリシーによる妥協が不要
+- テーブルが小さい = クエリが高速で vacuum の性能も向上
+- ユースケースごとに明確なデータライフサイクル管理
 
-### Scanner Interval Tuning
-The 30-second backlog threshold and 5-minute token accumulation intervals are design choices. Tune based on your requirements:
+### スキャナ間隔のチューニング
+30秒のバックログ閾値と5分のトークン集約間隔は設計上の選択です。要件に応じてチューニングしてください。
 
-| Table | Scanner Type | Interval | Rationale |
+| テーブル | スキャナの種類 | 間隔 | 根拠 |
 |-------|-------------|----------|-----------|
-| `outbox_events` | Hybrid backlog scanner | 30-60s | Balance between latency and database load |
-| `scheduled_events` | Scheduled event scanner | 1 min | Subscription expiry doesn't need sub-minute precision |
-| `accumulation_buffer` | Token accumulator | 5-10 min | High volume, users check quotas infrequently |
+| `outbox_events` | ハイブリッドのバックログスキャナ | 30〜60秒 | レイテンシとデータベース負荷のバランス |
+| `scheduled_events` | 予約イベントスキャナ | 1分 | サブスクの失効に1分未満の精度は不要 |
+| `accumulation_buffer` | トークンアキュムレータ | 5〜10分 | 大量で、ユーザーがクォータを確認する頻度は低い |
 
-**Pro tip**: Start with longer intervals and decrease based on actual user needs. Premature optimization wastes resources.
+**ヒント**: 最初は長めの間隔から始め、実際のユーザーのニーズに応じて短くしていきましょう。早すぎる最適化はリソースの無駄です。
 
-## Rust Make This Pattern Better
+## Rust がこのパターンをより良くする
 
-Beyond the code examples above, Rust provides unique advantages for this architecture:
+上記のコード例に加えて、Rust はこのアーキテクチャに独自の利点をもたらします。
 
-### Type-Safe Schema and Event State
+### 型安全なスキーマとイベント状態
 
-Use strong typing for event payloads with `serde` eliminate all kinds of serialization and deserialization vulnerability while also enable a graceful way with ADT and pattern matching to handle enumerate data.
+`serde` を使ってイベントペイロードに強い型付けを施すことで、あらゆる種類のシリアライズ・デシリアライズの脆弱性を排除でき、同時に ADT (代数的データ型) とパターンマッチングによって列挙的なデータをエレガントに扱えるようになります。
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "event_status", rename_all = "lowercase")]
 pub enum EventStatus {
-    Pending,    // Awaiting delivery
-    Processed,  // Consumer completed
-    Failed,     // Permanent failure
+    Pending,    // 配信待ち
+    Processed,  // コンシューマ完了
+    Failed,     // 恒久的な失敗
 }
 ```
 
@@ -485,7 +485,7 @@ pub enum EventPayload {
         plan: SubscriptionPlan,
         amount: Decimal,
     },
-    // ... other hybrid events
+    // ... その他のハイブリッドイベント
 }
 ```
 
@@ -512,13 +512,13 @@ pub struct AccumulationRecord {
 }
 ```
 
-### Compile-Time Database Schema Validation
+### コンパイル時のデータベーススキーマ検証
 
-This is the killer feature. When you run `cargo build`, sqlx:
-1. Connects to your development database
-2. Validates every query against the actual schema
-3. Generates type-safe Rust structs
-4. Catches mismatches before deployment
+これはキラー機能です。`cargo build` を実行すると、sqlx は次を行います。
+1. 開発用データベースに接続する
+2. 実際のスキーマに対してすべてのクエリを検証する
+3. 型安全な Rust の構造体を生成する
+4. デプロイ前に不整合を検出する
 
 ```
 $ cargo sqlx prepare
@@ -531,26 +531,26 @@ $ cargo build
     Finished dev [unoptimized + debuginfo] target(s) in 1.14s
 ```
 
-If you change the database schema, queries break at compile time:
+データベーススキーマを変更すると、クエリはコンパイル時に壊れます。
 ```
 $ cargo build
 error: error returned from database: column "scheduled_for" does not exist
   --> src/scanner.rs:23:5
 ```
 
-This eliminates an entire class of production bugs.
+これにより、本番環境のバグの一群を丸ごと排除できます。
 
-## When to Use This Pattern
+## このパターンを使うべきとき
 
-**Great fit when you have:**
-- Mixed latency requirements across different event types
-- High-volume events that don't need MQ overhead
-- Time-based events with known schedules
-- Need for auditability and event replay
-- Rust/TypeScript stack with strong typing requirements
+**次のような場合に最適です:**
+- イベントの種類ごとにレイテンシ要件が異なる
+- MQ のオーバーヘッドを必要としない大量イベントがある
+- スケジュールが既知の時刻ベースのイベントがある
+- 監査可能性とイベントの再生 (replay) が必要
+- 強い型付けを要求する Rust/TypeScript スタック
 
-**Not ideal when:**
-- All events have identical requirements (use simpler CDC or pure polling)
-- You need cross-datacenter replication (consider event streaming platforms)
-- Events are truly ephemeral with no persistence needs
-- Your team lacks operational capacity for managing scanners
+**次のような場合には不向きです:**
+- すべてのイベントが同一の要件を持つ (よりシンプルな CDC や純粋なポーリングを使う)
+- データセンター間レプリケーションが必要 (イベントストリーミング基盤を検討する)
+- イベントが本当に一時的で永続化の必要がない
+- チームにスキャナを運用する余力がない

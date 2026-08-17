@@ -1,9 +1,9 @@
 ---
-title: "Bypassing the SoftBank 光 10ギガ HGW with NixOS and systemd-networkd"
-description: "Replacing the SoftBank 光 10ギガ HGW with a NixOS router. Reading the three tunnel parameters off a single captured packet, cloning the HGW's MAC, DUID, and IAID with systemd-networkd, and the two bugs that cost me a 40-second hang and a total outage every 4 hours."
+title: "NixOS と systemd-networkd で SoftBank 光 10ギガ の HGW をバイパスする"
+description: "SoftBank 光 10ギガ の HGW を NixOS ルーターに置き換える方法。キャプチャした 1 つのパケットから 3 つのトンネルパラメータを読み取り、systemd-networkd で HGW の MAC・DUID・IAID をクローンする手順、そして 40 秒のハングと 4 時間ごとの全断を引き起こした 2 つのバグについて。"
 pubDate: "Aug 17 2026"
 tags:
- - Router
+ - ルーター
  - NixOS
 heroImageId: "821f8dba-079e-4522-b781-88c7f3a58500"
 heroImageSource: 'Pixiv'
@@ -12,91 +12,91 @@ heroImageAuthor: 'Tinia'
 heroImageAuthorUrl: 'https://www.pixiv.net/users/16148853'
 ---
 
-*All personal addresses, prefixes, and MACs below are redacted — placeholders are marked with `X` or angle brackets.*
+*以下に登場する個人のアドレス・プレフィックス・MAC はすべて伏せてあります。プレースホルダは `X` または山括弧で示しています。*
 
 ## TL;DR
 
-- SoftBank 光 10ギガ is **neither DS-Lite nor MAP-E**, despite what most Japanese blog posts say. It is a plain RFC 2473 IPv4-in-IPv6 tunnel (`ip6tnl`, Next Header 4) with a **dedicated** global IPv4 — all 65535 ports are yours.
-- The three parameters you need (BR address, CE address, public IPv4) can be read off a **single captured tunnel packet**. No RADIUS decoding, no vendor dictionary, no reverse engineering.
-- You must clone the HGW's WAN MAC, pin its DHCPv6 DUID and DHCPv6 IAID. Cloning the MAC alone is not enough. Bindings key on both. Getting this wrong gave me a total outage every 4 hours, on the dot — see Part 9.
-- It works on NixOS with `systemd.network`. Total config is about 40 lines.
-- MSS clamping is mandatory, not optional — without it every first connection to an IPv4-only site hangs for 40 seconds.
-- You must keep renting the HGW. This is a bypass, not a cancellation.
+- SoftBank 光 10ギガ は、多くの日本語ブログ記事が言うのとは違い、**DS-Lite でも MAP-E でもありません**。実体は素朴な RFC 2473 の IPv4-in-IPv6 トンネル（`ip6tnl`、Next Header 4）で、**専有**のグローバル IPv4 が割り当てられます。65535 ポートすべてが自分のものです。
+- 必要な 3 つのパラメータ（BR アドレス・CE アドレス・グローバル IPv4）は、**キャプチャした 1 つのトンネルパケット**から読み取れます。RADIUS のデコードも、ベンダー辞書も、リバースエンジニアリングも不要です。
+- HGW の WAN MAC をクローンし、その DHCPv6 DUID と DHCPv6 IAID を固定する必要があります。MAC をクローンするだけでは足りません。バインディングはこの両方をキーにしています。ここを間違えたせいで、きっかり 4 時間ごとに全断が発生しました。第 9 部を参照してください。
+- NixOS では `systemd.network` で実現できます。設定は合計でおよそ 40 行です。
+- MSS クランプは任意ではなく必須です。これがないと、IPv4 のみのサイトへの初回接続がすべて 40 秒ハングします。
+- HGW はレンタルし続ける必要があります。これはバイパスであって、解約ではありません。
 
-## Background
+## 背景
 
-I have SoftBank 光 10ギガ in Nara (so NTT West, フレッツ光クロス underneath). SoftBank shipped me a **ホームゲートウェイ（S）**, model `10G E-WMTA1.0` — internally a Sercomm **EVO310G**. This is the newer single-box unit that SoftBank started shipping in April 2025; it replaces the older XG-100NE + 光BBユニット combination and folds both roles into one device.
+私は奈良で SoftBank 光 10ギガ を契約しています（つまり下回りは NTT 西日本、フレッツ光クロスです）。SoftBank から送られてきたのは **ホームゲートウェイ（S）**、型番 `10G E-WMTA1.0` で、中身は Sercomm の **EVO310G** です。これは SoftBank が 2025 年 4 月から配布し始めた新しい一体型の機種で、従来の XG-100NE + 光BBユニット の組み合わせを置き換え、両方の役割を 1 台に統合したものです。
 
-That distinction matters, because nearly every existing write-up assumes an XG-100NE, and several of the tricks in those posts don't apply:
+この違いは重要です。というのも既存の解説記事のほぼすべてが XG-100NE を前提にしており、それらの記事にあるテクニックのいくつかは当てはまらないからです。
 
-| | XG-100NE (older) | ホームゲートウェイ（S）/ EVO310G |
+| | XG-100NE（旧） | ホームゲートウェイ（S）/ EVO310G |
 |---|---|---|
-| Vendor | NTT (NEC) | SoftBank (Sercomm) |
-| Hidden config page | `http://ntt.setup:8888/t/` | **does not exist** |
-| Setup menu | `http://ntt.setup/` | `http://192.168.3.1/` |
-| 4over6 provisioning | フレッツ・ジョイント software | its own RADIUS client + TFTP |
+| ベンダー | NTT（NEC） | SoftBank（Sercomm） |
+| 隠し設定ページ | `http://ntt.setup:8888/t/` | **存在しない** |
+| 設定メニュー | `http://ntt.setup/` | `http://192.168.3.1/` |
+| 4over6 のプロビジョニング | フレッツ・ジョイント のソフトウェア | 独自の RADIUS クライアント + TFTP |
 
-My router is a NixOS box with four interfaces:
+私のルーターは 4 つのインターフェースを持つ NixOS マシンです。
 
-- `enp1s0f0`, `enp1s0f1` — 10G SFP+
+- `enp1s0f0`、`enp1s0f1` — 10G SFP+
 - `enp4s0` — 10G RJ45
 - `enp7s0` — 1G RJ45
 
-`enp1s0f1` is bridged into `br-lan`. Everything is configured with `systemd.network`, deployed from my workstation with `nixos-rebuild --target-host`.
+`enp1s0f1` は `br-lan` にブリッジしています。すべて `systemd.network` で設定し、ワークステーションから `nixos-rebuild --target-host` でデプロイしています。
 
-## Part 1: What protocol is this, actually?
+## 第 1 部: これは実際には何のプロトコルなのか
 
-This is the question that wasted the most time up front, because the internet contradicts itself.
+これは最初に最も時間を無駄にした問いです。ネット上の情報が互いに矛盾しているからです。
 
-**The HGW's own status page says "MAP-E."** So bloggers repeat it. But packet captures published by others show plain IPIP encapsulation, and one researcher who dug into this concluded it's not "4rd/SAM" either — that's a rumour SoftBank has denied. What it actually is: the same RFC 2473 IPIP tunnel that JPIX/v6プラス uses for its *fixed-IP* contracts.
+**HGW 自身のステータスページには「MAP-E」と表示されます。** だからブロガーたちもそう繰り返します。しかし他の人が公開したパケットキャプチャは素朴な IPIP カプセル化を示しており、これを掘り下げたある研究者は「4rd/SAM」でもないと結論づけました。それは SoftBank が否定している噂です。実体は、JPIX/v6プラス が*固定 IP* 契約で使っているのと同じ RFC 2473 の IPIP トンネルです。
 
-The reconciliation is simple. BBIX runs MAP-E **without IPv4 address sharing**. With no port-set sharing, the MAP algorithm degenerates into "encapsulate everything and send it to the BR" — i.e. a dumb tunnel. So the HGW isn't lying exactly; it's just that the interesting part of MAP-E is switched off.
+辻褄合わせは簡単です。BBIX は **IPv4 アドレス共有なし**で MAP-E を運用しています。ポートセットの共有がないと、MAP のアルゴリズムは「すべてをカプセル化して BR に送る」に退化します。つまりただのトンネルです。ですから HGW は厳密には嘘をついているわけではなく、MAP-E の面白い部分がオフになっているだけなのです。
 
-DS-Lite is simply wrong. There's no AFTR and no CGN anywhere in the path.
+DS-Lite は単純に誤りです。経路のどこにも AFTR も CGN もありません。
 
-The most useful confirmation I found was in [`luci-app-fleth`](https://github.com/makeding/luci-app-fleth), an OpenWrt helper for Japanese IPv4-over-IPv6 tunnels. It has three categories — DS-Lite, MAP-E, and 固定IP — and lists `SoftBank 光` (both 1G and 10G) under **固定IP**, served by its `IPIP6H` protocol. That's a maintained compatibility table saying, unambiguously, *not MAP-E, not DS-Lite*.
+見つけた中で最も役立った確認は、日本の IPv4-over-IPv6 トンネル向けの OpenWrt ヘルパーである [`luci-app-fleth`](https://github.com/makeding/luci-app-fleth) でした。ここには DS-Lite・MAP-E・固定IP の 3 つのカテゴリがあり、`SoftBank 光`（1G と 10G の両方）を **固定IP** の下に、その `IPIP6H` プロトコルで扱うものとして列挙しています。これは、*MAP-E でも DS-Lite でもない* と明確に述べている、メンテナンスされた対応表です。
 
-Also worth knowing: **フレッツ光クロス does not offer PPPoE at all.** There is no fallback path. If the tunnel doesn't work, you have IPv6 and nothing else.
+知っておく価値がもう一つ。**フレッツ光クロス は PPPoE を一切提供していません。** フォールバック経路はありません。トンネルが動かなければ、手元に残るのは IPv6 だけです。
 
-### The silver lining
+### 不幸中の幸い
 
-Because IPv6 works fine over plain DHCPv6-PD with no tricks, **a broken tunnel leaves you with a working IPv6 internet**. `cache.nixos.org` and `github.com` both have AAAA records. That turned out to be a meaningful safety net.
+IPv6 は何のトリックもなく素の DHCPv6-PD で問題なく動くので、**トンネルが壊れても IPv6 のインターネットは生きたまま残ります**。`cache.nixos.org` も `github.com` も AAAA レコードを持っています。これは意味のあるセーフティネットになりました。
 
-## Part 2: What you need to extract
+## 第 2 部: 何を取り出す必要があるか
 
-| Value | Where it lives |
+| 値 | 在り処 |
 |---|---|
-| Public IPv4 | HGW setup menu |
-| CE IPv6 (tunnel local) | HGW setup menu |
-| WAN MAC | device label |
-| **BR IPv6 (tunnel remote)** | **nowhere — must be captured** |
-| **DHCPv6 DUID** | **nowhere — must be captured** |
-| **DHCPv6 IAID** | **nowhere — must be captured** |
-| IA_PD T1/T2/lifetimes | the same capture — worth recording |
+| グローバル IPv4 | HGW の設定メニュー |
+| CE IPv6（トンネルのローカル） | HGW の設定メニュー |
+| WAN MAC | 本体のラベル |
+| **BR IPv6（トンネルのリモート）** | **どこにもない — キャプチャするしかない** |
+| **DHCPv6 DUID** | **どこにもない — キャプチャするしかない** |
+| **DHCPv6 IAID** | **どこにもない — キャプチャするしかない** |
+| IA_PD の T1/T2/各ライフタイム | 同じキャプチャから — 記録しておく価値あり |
 
-The first three are free. The rest require putting yourself on the wire between the ONU and the HGW.
+最初の 3 つはタダで手に入ります。残りは、ONU と HGW の間の回線上に自分を割り込ませる必要があります。
 
-**The IAID is the one everybody misses, and skipping it cost me two four-hour outages.** DHCPv6 bindings are keyed on **DUID + IAID**, not DUID alone. Get the DUID perfect and the IAID wrong and the server ignores you exactly as thoroughly as if you'd sent neither. See Part 9.
+**IAID は誰もが見落とすもので、これを飛ばしたせいで 4 時間の全断を 2 回食らいました。** DHCPv6 のバインディングは DUID 単独ではなく **DUID + IAID** をキーにします。DUID を完璧にしても IAID を間違えれば、サーバーはどちらも送らなかったのと全く同じくらい徹底的にあなたを無視します。第 9 部を参照してください。
 
-## Part 3: The capture
+## 第 3 部: キャプチャ
 
-### Topology
+### トポロジー
 
-I originally planned to use a spare port for a temporary uplink so the house stayed online during the capture. Then I realised: **`nixos-rebuild --target-host` builds on the workstation and pushes the closure over the LAN. The router never needs internet to be reconfigured.** Tethering the workstation to my phone was enough, which freed both RJ45 ports for the tap.
+当初は、キャプチャ中も家がオンラインのままでいられるよう、空きポートを一時的なアップリンクに使うつもりでした。しかしこう気づきました。**`nixos-rebuild --target-host` はワークステーション側でビルドし、クロージャを LAN 経由で送り込む。ルーターの再設定にインターネットは一切不要なのだ、と。** ワークステーションをスマホにテザリングするだけで十分で、これで両方の RJ45 ポートをタップ用に空けられました。
 
 ```
 ONU ──────► enp4s0 (10G) ┐
-                         ├─ br-tap  (no IP, no STP)
+                         ├─ br-tap  (IPなし・STPなし)
 HGW WAN ◄── enp7s0 (1G)  ┘
 
 switch ◄─── enp1s0f1 ──── br-lan
 ```
 
-The ONU cable goes into its permanent home (`enp4s0`) on day one and never moves again. At cutover you just unplug the HGW. Speed mismatch across the bridge is fine — the HGW's WAN port autonegotiates down, and DHCPv6/RADIUS are a few hundred bytes.
+ONU のケーブルは初日に恒久的な定位置（`enp4s0`）に挿し、それ以降は二度と動かしません。切り替え時には HGW を抜くだけです。ブリッジをまたぐ速度の不一致は問題ありません。HGW の WAN ポートはオートネゴシエーションで速度を落としますし、DHCPv6/RADIUS は数百バイトです。
 
-Cost: the LAN has no internet for the duration. Budget 20 minutes.
+代償として、その間 LAN はインターネットにつながりません。20 分ほど見ておきましょう。
 
-### Tap config
+### タップの設定
 
 ```nix
 systemd.network.netdevs."05-br-tap" = {
@@ -120,13 +120,13 @@ environment.systemPackages = with pkgs; [ tcpdump tshark ethtool ];
 boot.blacklistedKernelModules = [ "br_netfilter" ];
 ```
 
-Blacklisting `br_netfilter` matters: if it loads, your nftables rules start inspecting bridged frames and can silently eat the HGW's traffic, which looks exactly like "the tap is broken."
+`br_netfilter` をブラックリストに入れるのは重要です。これがロードされると nftables のルールがブリッジされたフレームを検査し始め、HGW のトラフィックを黙って飲み込んでしまうことがあります。これは見た目がまさに「タップが壊れている」と同じになります。
 
-> Do **not** clone the MAC yet. While `enp4s0` is a bridge port it has no address of its own and forwards frames unmodified — that's what makes the tap transparent. Cloning now would put two devices with the same MAC on one segment and thrash the bridge FDB.
+> **まだ** MAC をクローンしないでください。`enp4s0` がブリッジポートである間は自分自身のアドレスを持たず、フレームを改変せず転送します。これがタップを透過的にしている点です。今クローンすると、同じ MAC を持つ 2 台のデバイスが 1 つのセグメントに存在することになり、ブリッジの FDB を掻き乱します。
 
-### Getting the BR address
+### BR アドレスを手に入れる
 
-This is the part I over-thought. Everyone describes sniffing the RADIUS `Access-Accept` and hex-decoding vendor attributes 204 and 207. You don't have to. **One tunnel packet contains everything:**
+ここは考えすぎた部分です。誰もが RADIUS の `Access-Accept` を盗聴してベンダー属性 204 と 207 を 16 進デコードする方法を説明しています。その必要はありません。**1 つのトンネルパケットにすべてが入っています。**
 
 ```
 $ sudo tcpdump -nn -i br-tap -c 20 'ip6 proto 4'
@@ -134,38 +134,38 @@ $ sudo tcpdump -nn -i br-tap -c 20 'ip6 proto 4'
 IP6 2400:2000:4:0:a000::XXXX > 2400:2650:XXXX:XXXX:1111:1111:1111:1111: \
     IP 198.51.100.42.44424 > <MY_IPV4>.10000: Flags [S], seq ..., length 0
     ^^^^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    BR = tunnel Remote       CE = tunnel Local          inner: your IPv4
+    BR = トンネルの Remote   CE = トンネルの Local     内側: あなたの IPv4
 ```
 
-No HGW reboot needed — this traffic flows constantly. Cross-check the CE address and IPv4 against the HGW's setup menu; three-way agreement means you're done.
+HGW の再起動は不要です。このトラフィックは常に流れています。CE アドレスと IPv4 を HGW の設定メニューと突き合わせてください。3 つが一致すれば完了です。
 
-### Things the capture told me for free
+### キャプチャがタダで教えてくれたこと
 
-**The IPv4 really is dedicated.** Almost everything in my capture was inbound scan traffic — SYNs to ports 10000, 8181, 63500, 3128, 31038, 19998 from hosts all over the world. Boring in itself, but a positive result: on a port-sharing MAP-E deployment you would only see packets landing in your assigned port range. Arbitrary low and high ports arriving means all 65535 are mine. That settles the MAP-E question empirically, for my line, without trusting anyone's blog post.
+**IPv4 は本当に専有です。** 私のキャプチャのほとんどは受信側のスキャントラフィックでした。世界中のホストからポート 10000、8181、63500、3128、31038、19998 への SYN です。それ自体は退屈ですが、良い結果でもあります。ポート共有の MAP-E 構成なら、割り当てられたポート範囲に着信するパケットしか見えないはずです。低いポートも高いポートも任意に届くということは、65535 すべてが自分のものだということです。これで、誰かのブログ記事を信用せずとも、自分の回線については MAP-E かどうかの問題が経験的に決着します。
 
-> This is background radius of internet. Hackers may use your device to launch attack on someone else or your other devices. Keep you firewall on at public direction.
+> これはインターネットの背景放射のようなものです。攻撃者があなたのデバイスを踏み台にして他人や、あなたの他のデバイスを攻撃するかもしれません。公開側ではファイアウォールを有効にしておきましょう。
 
-**The BR block.** Mine lives in `2400:2000:4:0:a000::/64`. Others have published `::1919` and `::1999` from that same /64. Different host, same BBIX block — consistent with per-region BRs. Yours will differ; capture your own.
+**BR のブロック。** 私のものは `2400:2000:4:0:a000::/64` にあります。他の人はその同じ /64 から `::1919` や `::1999` を公開しています。ホストは違えど同じ BBIX のブロックで、地域ごとの BR という説明と整合します。あなたのものは違うはずなので、自分でキャプチャしてください。
 
-**The HGW phones home over the tunnel.** A TFTP read request for `10gewmta.sc` to a host in `221.111.x.x`. Independent confirmation of the model, and evidence that provisioning on this box isn't purely RADIUS-driven.
+**HGW はトンネル越しに自分の親元へ通信します。** `221.111.x.x` のホストに対する `10gewmta.sc` の TFTP 読み取り要求です。機種の独立した裏付けであり、この機器のプロビジョニングが純粋に RADIUS 主導ではない証拠でもあります。
 
-**It answers scanners with RST, not DROP.** Which is a good reminder that the moment your router inherits that IPv4, it inherits an actively-probed public address.
+**スキャナーには DROP ではなく RST で応答します。** これは、ルーターがその IPv4 を引き継いだ瞬間に、活発に探られている公開アドレスも引き継ぐのだという、良い注意喚起になります。
 
-### Getting the DHCPv6 identity: DUID *and* IAID
+### DHCPv6 のアイデンティティを手に入れる: DUID *と* IAID
 
-This one does need an HGW power cycle, since DHCPv6 only runs at boot:
+こちらは HGW の電源再投入が必要です。DHCPv6 は起動時にしか走らないからです。
 
 ```sh
 sudo tcpdump -nn -i enp4s0 -w /tmp/sb.pcap \
   'udp port 546 or udp port 547 or udp port 1812 or udp port 1813'
-# power-cycle the HGW, wait for it to come fully up, Ctrl-C
+# HGW の電源を入れ直し、完全に起動しきるまで待って Ctrl-C
 
 tshark -r /tmp/sb.pcap -Y 'dhcpv6.msgtype == 1' -V
 ```
 
-Don't grep for just the Client Identifier — dump the whole Solicit. You need three things out of it.
+Client Identifier だけを grep しないでください。Solicit 全体をダンプします。ここから 3 つのものが必要です。
 
-**1. The DUID:**
+**1. DUID:**
 
 ```
 Client Identifier
@@ -180,9 +180,9 @@ Reconfigure Accept
     Option: Reconfigure Accept (20)
 ```
 
-DUID-LL (type 3) wrapping the WAN MAC. `98:2c:c6` is Sercomm's OUI, confirming EVO310G.
+WAN MAC を包む DUID-LL（type 3）です。`98:2c:c6` は Sercomm の OUI で、EVO310G であることを裏付けます。
 
-**2. The IAID:**
+**2. IAID:**
 
 ```
 Identity Association for Prefix Delegation
@@ -193,58 +193,58 @@ Identity Association for Prefix Delegation
     T2: 0
 ```
 
-`IAID: 00000001`. systemd-networkd derives its IAID from a hash of the interface name, so yours will be some arbitrary value with no relationship to the HGW's. **The server keys the binding on DUID + IAID.** A perfect DUID with a mismatched IAID gets you exactly nothing.
+`IAID: 00000001` です。systemd-networkd はインターフェース名のハッシュから IAID を導出するため、あなたの値は HGW のものとは無関係な任意の値になります。**サーバーは DUID + IAID でバインディングを引きます。** DUID が完璧でも IAID が合っていなければ、得られるものは何もありません。
 
-Note also that the Solicit carries **only IA_PD** — no IA_NA. Match that with `UseAddress = false`, or you're asking for something the server doesn't hand out on this line.
+また、Solicit が **IA_PD のみ**を運んでいることにも注意してください。IA_NA はありません。これに合わせて `UseAddress = false` にしないと、この回線でサーバーが払い出さないものを要求することになります。
 
-**3. The lease lifetimes**, from the Reply:
+**3. リースのライフタイム**、Reply から取得します。
 
 ```sh
 tshark -r /tmp/sb.pcap -Y 'dhcpv6.msgtype == 7' -V | grep -A12 'Prefix Delegation'
 ```
 
-Mine: T1 7200, T2 10800, preferred 12600, **valid 14400**. Write that number down. It is the length of the fuse on the failure in Part 9, and knowing it in advance turns a baffling outage into a five-minute diagnosis.
+私の場合: T1 7200、T2 10800、preferred 12600、**valid 14400** です。この数字は書き留めておいてください。第 9 部の障害における導火線の長さであり、事前に知っていれば、わけの分からない全断を 5 分の診断に変えてくれます。
 
-### The DUID byte-layout trap
+### DUID のバイト配置の罠
 
-This burned four hours of my life twice, so it gets its own heading.
+これは私の人生を 4 時間ずつ 2 回も焼き尽くしたので、独立した見出しを与えます。
 
-`DUIDRawData` in systemd-networkd is the **payload after the 2-byte type field**. networkd writes the type itself, derived from `DUIDType`. Feed it the full DUID and it stacks its own type field on top:
+systemd-networkd における `DUIDRawData` は、**2 バイトの type フィールドより後ろのペイロード**です。type そのものは networkd が `DUIDType` から導出して書き込みます。ここに完全な DUID を渡すと、networkd は自分の type フィールドをその上に重ねてしまいます。
 
 ```
 HGW    (Length: 10)  00 03  0001982cc6XXXXXX
-Router (Length: 12)  00 03  00030001982cc6XXXXXX      ← WRONG
+Router (Length: 12)  00 03  00030001982cc6XXXXXX      ← 間違い
                      ^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
-                     type   what I put in DUIDRawData
-                 prepended
-                 by networkd
+                     型     DUIDRawData に入れた値
+                 networkd が
+                 前置する
 ```
 
-| | bytes |
+| | バイト |
 |---|---|
-| Full DUID on the wire | `0003` `0001` `982cc6XXXXXX` |
-| `DUIDType = "link-layer"` supplies | `0003` |
-| `DUIDRawData` must be | `0001982cc6XXXXXX` — **8 bytes** |
+| 回線上の完全な DUID | `0003` `0001` `982cc6XXXXXX` |
+| `DUIDType = "link-layer"` が供給する | `0003` |
+| `DUIDRawData` に入れるべき値 | `0001982cc6XXXXXX` — **8 バイト** |
 
-The `00:01` that stays is the **hardware type** (Ethernet), not part of the DUID type. Same value pattern, different field, one byte-pair apart — which is exactly why this is easy to get wrong and nearly invisible once written.
+残る `00:01` は **hardware type**（Ethernet）であって、DUID の type の一部ではありません。値のパターンは同じ、フィールドは別、1 バイトペアだけずれている — だからこそ間違えやすく、いったん書いてしまうとほとんど気づけないのです。
 
-The fastest check is the length, before you read a single hex digit: `Length: 10` is right, `Length: 12` means your payload is too long.
+最速の確認は、16 進を 1 桁も読む前に長さを見ることです。`Length: 10` なら正解、`Length: 12` ならペイロードが長すぎます。
 
-**Why you need any of this and not just the MAC:** NTT's DHCPv6-PD server keys on DUID + IAID. systemd-networkd defaults to DUID-EN (vendor-based) plus a name-hashed IAID, which will not get you your `/56` no matter what MAC you're presenting. The DUID *contains* the MAC, so pinning MAC, DUID, and IAID is consistent, not redundant.
+**なぜ MAC だけでなくこれらすべてが必要なのか。** NTT の DHCPv6-PD サーバーは DUID + IAID をキーにします。systemd-networkd の既定は DUID-EN（ベンダーベース）に名前ハッシュの IAID を組み合わせたもので、どんな MAC を提示しようと `/56` は得られません。DUID は MAC を*含んでいる*ので、MAC・DUID・IAID を固定するのは冗長ではなく整合的です。
 
-Also note `Reconfigure Accept` in that Solicit — file it away, it matters later.
+その Solicit に `Reconfigure Accept` があることにも注意してください。あとで効いてくるので覚えておきましょう。
 
-Copy the pcap off the router before tearing anything down. You will want it at 2am when the tunnel won't come up and the HGW is no longer in the path. I went back to mine three separate times.
+何かを撤去する前に、pcap をルーターの外へコピーしておいてください。トンネルが上がらず HGW がもう経路にいない午前 2 時に、きっと欲しくなります。私は自分のものに 3 回も戻りました。
 
-## Part 4: The NixOS config
+## 第 4 部: NixOS の設定
 
 ```nix
 { lib, pkgs, ... }:
 let
   wanIf   = "enp4s0";
   hgwMac  = "98:2c:c6:XX:XX:XX";
-  # payload ONLY — networkd prepends the 2-byte type field itself.
-  # Captured DUID is 00:03:00:01:98:2c:c6:XX:XX:XX; drop the leading 00:03.
+  # ペイロードのみ — networkd が 2 バイトの type フィールドを自分で前置する。
+  # キャプチャした DUID は 00:03:00:01:98:2c:c6:XX:XX:XX; 先頭の 00:03 を落とす。
   hgwDuid = "00:01:98:2c:c6:XX:XX:XX";
   ceAddr  = "2400:2650:XXXX:XXXX:1111:1111:1111:1111";
   brAddr  = "2400:2000:4:0:a000::XXXX";
@@ -253,7 +253,7 @@ in
 {
   boot.kernelModules = [ "ip6_tunnel" ];
 
-  # WAN: clone MAC, pin DUID, take RA + PD, attach the tunnel
+  # WAN: MAC をクローン、DUID を固定、RA + PD を受け取り、トンネルを接続
   systemd.network.networks."10-wan" = {
     matchConfig.Name = wanIf;
     linkConfig.MACAddress = hgwMac;
@@ -267,15 +267,15 @@ in
     dhcpV6Config = {
       DUIDType = "link-layer";
       DUIDRawData = hgwDuid;
-      IAID = 1;                 # from the HGW's Solicit — NOT networkd's default
+      IAID = 1;                 # HGW の Solicit から — networkd の既定ではない
       PrefixDelegationHint = "::/56";
-      UseAddress = false;       # the HGW asks for IA_PD only, no IA_NA
+      UseAddress = false;       # HGW は IA_PD のみを要求、IA_NA なし
       UseDNS = false;
       WithoutRA = "solicit";
     };
   };
 
-  # The tunnel itself
+  # トンネル本体
   systemd.network.netdevs."20-sbtun" = {
     netdevConfig = { Name = "sbtun"; Kind = "ip6tnl"; MTUBytes = "1460"; };
     tunnelConfig = {
@@ -294,23 +294,23 @@ in
 }
 ```
 
-### Set the MAC in `[Link]` of the `.network`, not a `.link` file
+### MAC は `.link` ファイルではなく `.network` の `[Link]` で設定する
 
-This is worth calling out. `.link` files are applied by **udev at device-add time**, so a `nixos-rebuild switch` will not reapply one to an interface that already exists — you need `udevadm trigger --action=add` or a reboot. `[Link] MACAddress=` inside a `.network` file is applied by networkd itself and takes effect on reload.
+これは強調しておく価値があります。`.link` ファイルは **udev がデバイス追加時に**適用するため、`nixos-rebuild switch` では既に存在するインターフェースに再適用されません。`udevadm trigger --action=add` か再起動が必要です。`.network` ファイル内の `[Link] MACAddress=` は networkd 自身が適用し、リロードで反映されます。
 
-"Why didn't my MAC change" is a miserable thing to debug with no uplink. A stale `.link` file also silently wins over the `.network` setting, so if you followed a guide that used one, delete it.
+「なぜ MAC が変わらないのか」を、アップリンクなしでデバッグするのは悲惨です。古い `.link` ファイルは `.network` の設定を黙って上書きして勝つので、`.link` を使うガイドに従っていたなら削除してください。
 
-The interface name doesn't change when the MAC does — `enp4s0` is derived from the PCI path, not the address.
+MAC が変わってもインターフェース名は変わりません。`enp4s0` はアドレスではなく PCI パスから導出されるからです。
 
-### `EncapsulationLimit = "none"` is not optional
+### `EncapsulationLimit = "none"` は任意ではない
 
-By default the kernel adds an IPv6 Destination Options header carrying a tunnel encapsulation limit. Some BRs drop those. Check with `ip -d link show sbtun`: if it says `encaplimit 4` instead of `encaplimit none`, that's your bug. This is the classic cause of "tunnel is up, nothing passes."
+既定ではカーネルが、トンネルのカプセル化上限を運ぶ IPv6 Destination Options ヘッダーを付けます。一部の BR はそれを破棄します。`ip -d link show sbtun` で確認してください。`encaplimit none` ではなく `encaplimit 4` と出ていたら、それがバグです。これは「トンネルは上がっているのに何も通らない」の典型的な原因です。
 
-(`ip -d` will report the mode as `ip4ip6`. That's the same thing you configured as `Mode=ipip6`, not an error.)
+（`ip -d` はモードを `ip4ip6` と報告します。これは `Mode=ipip6` として設定したものと同じで、エラーではありません。）
 
-## Part 5: The firewall — the part that actually matters
+## 第 5 部: ファイアウォール — 本当に肝心な部分
 
-My pre-existing config was:
+元々の設定はこうでした。
 
 ```nix
 networking.firewall = {
@@ -320,27 +320,27 @@ networking.firewall = {
 };
 ```
 
-With no `allowedTCPPorts` anywhere, the input chain defaults to drop on every untrusted interface. Netdata was bound to `0.0.0.0:19999` but reachable only from LAN and Tailscale. That held up fine.
+`allowedTCPPorts` がどこにもないので、input チェインは信頼されていないすべてのインターフェースで既定として drop します。Netdata は `0.0.0.0:19999` にバインドされていましたが、到達できるのは LAN と Tailscale からだけでした。これは問題なく持ちこたえました。
 
-Three things change at cutover.
+切り替え時に変わることが 3 つあります。
 
-**1. `nat.externalInterface` must move to `sbtun`, obviously.** Masquerading on `enp4s0` would be applied to an interface carrying only IPv6 and encapsulated frames; LAN traffic would leave the tunnel with RFC1918 sources and vanish.
+**1. `nat.externalInterface` は当然ながら `sbtun` に移す必要があります。** `enp4s0` でマスカレードすると、IPv6 とカプセル化されたフレームしか運んでいないインターフェースに適用されてしまい、LAN のトラフィックは RFC1918 の送信元アドレスのままトンネルを出て消えてしまいます。
 
-**2. Default-deny will silently kill your tunnel.** Encapsulated return traffic arrives as an IPv6 packet with next header 4, and netfilter's input hook runs *before* the kernel hands it to the decapsulator. The drop policy eats it. `sbtun` shows UP and counts zero RX. You must allow protocol 4 explicitly:
+**2. 既定の拒否はトンネルを黙って殺します。** カプセル化された戻りトラフィックは next header 4 の IPv6 パケットとして届きますが、netfilter の input フックはカーネルがそれをデカプセル化器に渡す*前*に走ります。drop ポリシーがそれを飲み込みます。`sbtun` は UP と表示され、RX は 0 のままです。プロトコル 4 を明示的に許可する必要があります。
 
 ```nix
 networking.nftables.enable = true;
 networking.firewall.extraInputRules = ''
-  # proto 4 = IPv4-in-IPv6 (RFC 2473) from the BBIX BR
+  # proto 4 = BBIX の BR からの IPv4-in-IPv6（RFC 2473）
   ip6 saddr ${brAddr} meta l4proto 4 accept
 '';
 ```
 
-> **Gotcha:** `meta l4proto ipencap` does not compile — you get `Error: Could not resolve protocol name`. nftables resolves `l4proto` names from a small built-in table (`tcp`, `udp`, `icmp`, `icmpv6`, `sctp`, `dccp`, `ah`, `esp`, `comp`, `udplite`), *not* from `/etc/protocols`. Anything outside that list must be numeric. Same trap applies to GRE (47) and 6in4 (41).
+> **落とし穴:** `meta l4proto ipencap` はコンパイルできません。`Error: Could not resolve protocol name` が出ます。nftables は `l4proto` の名前を、`/etc/protocols` *ではなく*、小さな組み込みテーブル（`tcp`、`udp`、`icmp`、`icmpv6`、`sctp`、`dccp`、`ah`、`esp`、`comp`、`udplite`）から解決します。このリストの外にあるものはすべて数値で書かなければなりません。同じ罠が GRE（47）と 6in4（41）にも当てはまります。
 
-**3. Your LAN loses its IPv6 firewall entirely.** This is the real exposure and it is invisible in the config. Once you're delegating a `/56` and sending RAs, every LAN device gets a globally routable address — and `networking.firewall` only filters the *input* chain by default. Forwarded traffic passes unfiltered. No NAT is accidentally protecting anything.
+**3. LAN は IPv6 ファイアウォールを完全に失います。** これが本当の露出であり、設定上は見えません。`/56` を委任して RA を送るようになると、すべての LAN デバイスがグローバルにルーティング可能なアドレスを持ちます。そして `networking.firewall` は既定で *input* チェインしかフィルタしません。転送されるトラフィックはフィルタされずに通ります。NAT が偶然何かを守ってくれるということもありません。
 
-Given how many scanners were already hammering that IPv4 in my capture:
+私のキャプチャで、いかに多くのスキャナーが既にその IPv4 を叩いていたかを踏まえると、こうします。
 
 ```nix
 networking.firewall.filterForward = true;
@@ -350,119 +350,119 @@ networking.firewall.extraForwardRules = ''
 '';
 ```
 
-Keep `checkReversePath = "loose"`. Strict RPF and a `/32` on a point-to-point tunnel with an on-link default route do not get along.
+`checkReversePath = "loose"` のままにしてください。厳格な RPF と、オンリンクのデフォルト経路を持つポイントツーポイントトンネル上の `/32` は相性が悪いのです。
 
-> Verify the firewall from outside, not from the LAN
+> ファイアウォールは LAN の内側からではなく外側から検証してください
 >
 > ```sh
 > nmap -Pn -p 22,19999,80,443 <MY_IPV4>
-> nmap -6 -Pn -p 22,19999 <a LAN device's global IPv6>
+> nmap -6 -Pn -p 22,19999 <LAN デバイスのグローバル IPv6>
 > ```
 >
-> The second one is the test that actually matters, and it's the one people skip. Run both from a phone hotspot — you won't have NAT loopback until you configure it, so testing from inside proves nothing.
+> 2 つ目こそが本当に肝心なテストで、しかもみんなが飛ばすものです。両方ともスマホのテザリングから実行してください。NAT ループバックは設定するまで存在しないので、内側からテストしても何の証明にもなりません。
 
-## Part 6: Deploying without internet
+## 第 6 部: インターネットなしでのデプロイ
 
-The premise worth attacking: **the router never needs internet to be rebuilt.** `nixos-rebuild --target-host` evaluates and builds entirely on the workstation and pushes the closure over SSH on the LAN. The router is a dumb recipient.
+崩す価値のある前提。**ルーターの再ビルドにインターネットは一切不要です。** `nixos-rebuild --target-host` は評価とビルドを完全にワークステーション側で行い、クロージャを LAN 上の SSH 経由で送り込みます。ルーターはただの受け手です。
 
 ```sh
-# once, while online — pull inputs and prebuild the closure
+# 一度だけ、オンライン中に — 入力を取得してクロージャを事前ビルドする
 nix flake archive
 nix build .#nixosConfigurations.router.config.system.build.toplevel
 
-# then, offline-safe
+# その後はオフラインでも安全
 nixos-rebuild switch --flake .#router --target-host root@<router> --fast
 ```
 
-Only *adding a new dependency* needs the network. Config-only edits rebuild from the local store.
+ネットワークが必要なのは*新しい依存を追加する*ときだけです。設定だけの変更はローカルストアから再ビルドされます。
 
-Safe iteration loop:
+安全な反復ループ。
 
 ```sh
-# 1. apply without touching the bootloader
+# 1. ブートローダーに触れずに適用する
 nixos-rebuild test --flake .#router --target-host root@<router>
 
-# 2. arm a dead-man's switch — reboot returns to last known-good
+# 2. デッドマンスイッチを仕掛ける — 再起動で最後の正常状態に戻る
 ssh root@<router> 'systemd-run --on-active=10min --unit=deploy-watchdog systemctl reboot'
 
-# 3. if it works
+# 3. うまくいったら
 ssh root@<router> 'systemctl stop deploy-watchdog.timer'
 nixos-rebuild switch --flake .#router --target-host root@<router>
 ```
 
-Because `test` doesn't update the boot entry, a reboot *is* the rollback. No rollback logic to write. `deploy-rs` with `magicRollback = true` automates the same dance if you'd rather not hand-roll it.
+`test` はブートエントリを更新しないので、再起動が*そのまま*ロールバックになります。書くべきロールバックロジックはありません。手で組みたくなければ、`magicRollback = true` を付けた `deploy-rs` が同じ段取りを自動化してくれます。
 
-Two more things that shorten the loop a lot:
+ループを大幅に短くするものがあと 2 つあります。
 
-- **Don't rebuild to test the tunnel.** It's five `ip` commands. Iterate in a shell until packets flow, *then* translate to Nix once.
-- **Use a specialisation** for the risky config, so the boot default stays the known-good state and a power cycle is the escape hatch.
+- **トンネルのテストのために再ビルドしないでください。** `ip` コマンド 5 つで済みます。パケットが流れるまでシェルで反復し、*それから* 一度だけ Nix に落とし込みます。
+- **リスクのある設定にはスペシャライゼーションを使いましょう。** そうすればブートの既定は正常な状態のままになり、電源の再投入が脱出口になります。
 
-## Part 7: Cutover checklist
+## 第 7 部: 切り替えチェックリスト
 
-Before unplugging the HGW:
+HGW を抜く前に:
 
-- BR IPv6 recorded from `ip6 proto 4` source
-- CE IPv6 copied **verbatim** — don't invent an interface ID
-- Public IPv4 matches the HGW setup menu
-- WAN MAC recorded (and the burned-in MAC saved via `ethtool -P`, for reverting)
-- DHCPv6 Client Identifier bytes recorded — **payload is 8 bytes, not 10**
-- **DHCPv6 IAID recorded** (IA_PD option, same Solicit)
-- IA_PD T1/T2/preferred/valid lifetimes noted — the valid lifetime is your fuse length
-- `ls /etc/systemd/network/*.link` — no strays renaming the WAN interface
-- pcap copied off the router
-- `ss -tlnp` audited for anything bound to `0.0.0.0` / `::`
-- Closure prebuilt on the workstation
-- Phone tethered
+- `ip6 proto 4` の送信元から BR IPv6 を記録した
+- CE IPv6 を**一字一句そのまま**コピーした — インターフェース ID を勝手に作らない
+- グローバル IPv4 が HGW の設定メニューと一致している
+- WAN MAC を記録した（元に戻すため、焼き込みの MAC も `ethtool -P` で保存した）
+- DHCPv6 の Client Identifier のバイトを記録した — **ペイロードは 10 バイトではなく 8 バイト**
+- **DHCPv6 IAID を記録した**（IA_PD オプション、同じ Solicit 内）
+- IA_PD の T1/T2/preferred/valid の各ライフタイムを控えた — valid ライフタイムが導火線の長さ
+- `ls /etc/systemd/network/*.link` — WAN インターフェースをリネームする野良ファイルがない
+- pcap をルーターの外へコピーした
+- `ss -tlnp` で `0.0.0.0` / `::` にバインドされているものを監査した
+- クロージャをワークステーションで事前ビルドした
+- スマホをテザリングした
 
-Verification order after activation:
+アクティベーション後の検証順序。
 
 ```sh
-ip link show enp4s0 | grep ether     # cloned MAC
-networkctl status enp4s0             # a /56 arrived
-ip -6 addr show enp4s0 | grep 1111   # ceAddr present
-ip -d link show sbtun                # encaplimit none, correct local/remote
-ip -s link show sbtun                # RX climbing, not just TX
+ip link show enp4s0 | grep ether     # クローンした MAC
+networkctl status enp4s0             # /56 が届いた
+ip -6 addr show enp4s0 | grep 1111   # ceAddr がある
+ip -d link show sbtun                # encaplimit none、local/remote が正しい
+ip -s link show sbtun                # TX だけでなく RX が増えている
 ip route get 8.8.8.8                 # dev sbtun
 ping -c3 8.8.8.8
 ```
 
-Diagnostic shortcuts:
+診断のショートカット。
 
-- **No `/56`** → DUID or MAC mismatch. Check `journalctl -u systemd-networkd -b | grep -i dhcp`.
-- **`/56` but no IPv4** → `EncapsulationLimit` missing, or `Local=` doesn't match `ceAddr` exactly.
-- **TX climbing, RX flat** → firewall eating protocol 4, or the BR rejecting your source address.
-- **Test with `ping 8.8.8.8`, not `ping google.com`.** With `UseDNS = false` on both interfaces, name resolution fails independently of whether the tunnel works.
+- **`/56` が来ない** → DUID か MAC の不一致。`journalctl -u systemd-networkd -b | grep -i dhcp` を確認。
+- **`/56` は来るが IPv4 がない** → `EncapsulationLimit` が抜けているか、`Local=` が `ceAddr` と厳密に一致していない。
+- **TX は増えるが RX が横ばい** → ファイアウォールがプロトコル 4 を飲み込んでいるか、BR が送信元アドレスを拒否している。
+- **`ping google.com` ではなく `ping 8.8.8.8` でテストしてください。** 両方のインターフェースで `UseDNS = false` にしていると、トンネルが動くかどうかとは無関係に名前解決が失敗します。
 
-## Part 8: First bug — every first request to an IPv4-only site hung
+## 第 8 部: 最初のバグ — IPv4 のみのサイトへの初回リクエストが毎回ハングした
 
-Symptom: opening a site with no AAAA record hung for ~40 seconds. Retry, on any machine, was instant. It looks like a DNS issue, but wasn't.
+症状: AAAA レコードのないサイトを開くと約 40 秒ハングします。どのマシンでも、再試行は一瞬でした。DNS の問題に見えますが、違いました。
 
-> This blog only doesn't have AAAA record. You can test with this blog.
+> このブログはちょうど AAAA レコードを持っていないので、このブログで試せます。
 
-The tell is that it tracked exactly with "does this site have IPv6" — dual-stack sites were fine because that path is native `enp4s0` at MTU 1500 with no encapsulation. Only IPv4 goes through `sbtun` at 1460.
+手がかりは、「そのサイトが IPv6 を持っているか」と完全に連動していたことです。デュアルスタックのサイトは問題ありませんでした。その経路はカプセル化のない MTU 1500 のネイティブな `enp4s0` だからです。IPv4 だけが 1460 の `sbtun` を通ります。
 
-`tcpdump -nn -i sbtun` during a hang:
+ハング中の `tcpdump -nn -i sbtun`:
 
 ```
-SYN         options [mss 1460, ...]        ← the bug is right here
+SYN         options [mss 1460, ...]        ← バグはまさにここ
 SYN-ACK     options [mss 1460, ...]
 ACK
-PSH 1:1561  (ClientHello)                  ← outbound fine
-ACK 1409 / ACK 1561                        ← server received it all
+PSH 1:1561  (ClientHello)                  ← 送信は正常
+ACK 1409 / ACK 1561                        ← サーバーは全て受信した
 
-PSH seq 5793:5830, length 37               ← 37 bytes, arrives fine
-ACK 1, sack {5793:5830}                    ← "I have byte 1, and 5793-5830"
+PSH seq 5793:5830, length 37               ← 37 バイト、正常に到着
+ACK 1, sack {5793:5830}                    ← 「バイト 1 と 5793-5830 を受信済み」
 ```
 
-Bytes 1–5792 — the ServerHello and certificate chain — never arrived. Only the tiny 37-byte tail got through. **Small packets pass, full-size ones vanish, no ICMP.** Then ~63 seconds of a stuck window, a FIN, and a RST.
+バイト 1〜5792 — ServerHello と証明書チェーン — は決して届きませんでした。届いたのはわずか 37 バイトの末尾だけです。**小さいパケットは通り、フルサイズのものは消え、ICMP もない。** その後、約 63 秒のウィンドウの停止、FIN、そして RST が続きます。
 
-The `sack` block is the signature. If you see a SACK for a high range while the ACK is still stuck at 1, you are looking at a PMTU black hole, not a slow server.
+`sack` ブロックが決め手です。ACK がまだ 1 で止まっているのに高い範囲の SACK が見えたら、それは遅いサーバーではなく PMTU ブラックホールを見ているのです。
 
-Mechanism: the client advertises MSS 1460 from its own 1500-byte MTU. The server sends 1460-byte payloads. The BR must wrap those in a 40-byte IPv6 header — 1540 bytes — which exceeds the path MTU, so it drops them. Whether ICMP Fragmentation Needed gets generated is moot; enough of the internet drops ICMP that it never reaches the sender.
+仕組み: クライアントは自分の 1500 バイトの MTU から MSS 1460 を広告します。サーバーは 1460 バイトのペイロードを送ります。BR はそれを 40 バイトの IPv6 ヘッダーで包まなければならず — 1540 バイト — これが経路 MTU を超えるので破棄します。ICMP Fragmentation Needed が生成されるかどうかは問題ではありません。インターネットの十分に多くの部分が ICMP を破棄するので、送信者には届かないのです。
 
-Retries succeed because Linux caches a PMTU entry after the first stall. So you pay one 40-second timeout per destination, per machine, per cache lifetime — which is exactly the "first load hangs, second is instant" pattern.
+再試行が成功するのは、Linux が最初の停止のあとに PMTU エントリをキャッシュするからです。つまり宛先ごと・マシンごと・キャッシュのライフタイムごとに 40 秒のタイムアウトを 1 回だけ支払うことになり、これがまさに「初回はハング、2 回目は一瞬」というパターンです。
 
-Fix:
+修正。
 
 ```nix
 networking.nftables.tables.clamp = {
@@ -483,21 +483,21 @@ networking.nftables.tables.clamp = {
 boot.kernel.sysctl."net.ipv4.tcp_mtu_probing" = 1;
 ```
 
-Three deliberate choices:
+意図的な選択が 3 つあります。
 
-- `size set rt mtu` derives from the route MTU rather than hardcoding 1420. Change `MTUBytes` later and this follows automatically.
-- **Both** `oifname` and `iifname` on forward. The first fixes what you advertise; the second rewrites the *server's* advertisement before it reaches your LAN client, so neither end can overshoot.
-- A separate `output` chain with `type route hook output` for traffic originating on the router itself.
+- `size set rt mtu` は 1420 をハードコードするのではなく経路 MTU から導出します。あとで `MTUBytes` を変えても自動的に追従します。
+- forward に `oifname` と `iifname` の**両方**を指定します。前者は自分が広告する値を直し、後者は*サーバー*の広告が LAN のクライアントに届く前に書き換えるので、どちらの端も超過できなくなります。
+- ルーター自身から発するトラフィックのために、`type route hook output` を持つ別の `output` チェインを用意します。
 
-Verify with `tcpdump -i sbtun 'tcp[tcpflags] & tcp-syn != 0'` — SYNs should now carry `mss 1420`. Run `ip route flush cache` first, or you'll be testing the cached PMTU rather than the fix.
+`tcpdump -i sbtun 'tcp[tcpflags] & tcp-syn != 0'` で検証します。SYN は今度は `mss 1420` を運んでいるはずです。先に `ip route flush cache` を実行してください。さもないと、修正ではなくキャッシュされた PMTU をテストすることになります。
 
-## Part 9: Second bug — total outage every 4 hours, exactly
+## 第 9 部: 2 つ目のバグ — きっかり 4 時間ごとの全断
 
-This is the one that nearly beat me, and the fix is a single missing field.
+これは私をほとんど打ち負かしたもので、修正はたった一つ欠けていたフィールドでした。
 
-### What happened
+### 何が起きたか
 
-Roughly four hours after cutover, all internet stopped. Not degraded — gone.
+切り替えからおよそ 4 時間後、すべてのインターネットが止まりました。劣化ではなく、消失です。
 
 ```
 9: sbtun@enp4s0: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1460 ...
@@ -507,27 +507,27 @@ Roughly four hours after cutover, all internet stopped. Not degraded — gone.
         269687    4060    164     164     164       0
 ```
 
-RX exactly zero, TX with carrier errors. Rebooting the ONU and the router did not help.
+RX はきっかり 0、TX には carrier エラー。ONU とルーターを再起動しても効果はありませんでした。
 
-- `ping6` to the BR failed
-- **No Router Advertisements arriving at all** (`tcpdump -nn -i enp4s0 'icmp6 && ip6[40] == 134'` → silence)
-- No dynamic SLAAC address
-- Nothing in the networkd journal mentioning DHCP, renew, or rebind
-- Unfiltered `tcpdump -i enp4s0` showed plenty of traffic — but **100% outbound**
+- BR への `ping6` が失敗した
+- **Router Advertisement が一切届かない**（`tcpdump -nn -i enp4s0 'icmp6 && ip6[40] == 134'` → 沈黙）
+- 動的な SLAAC アドレスがない
+- networkd のジャーナルに DHCP・renew・rebind の言及が何もない
+- フィルタなしの `tcpdump -i enp4s0` は大量のトラフィックを示した — しかし **100% 送信方向**
 
-Recovery: plug the HGW back into the ONU, let it come up, reconnect the router. No configuration change involved.
+復旧方法: HGW を ONU に挿し直し、起動させ、ルーターをつなぎ直す。設定変更は一切なし。
 
-### The clue that cracked it
+### 突破口になった手がかり
 
-It happened again — **exactly four hours after the HGW last connected**, not four hours after my router booted.
+再び起きました。しかも、ルーターが起動してから 4 時間後ではなく、**HGW が最後に接続してからきっかり 4 時間後**でした。
 
-That anchor is everything. 4 hours = 14400 seconds = the IA_PD **valid lifetime** from the capture. The countdown I was watching belonged to the lease the *HGW* established. My router never renewed it, because my router never had it.
+この基点がすべてです。4 時間 = 14400 秒 = キャプチャから得た IA_PD の **valid ライフタイム**。私が見ていたカウントダウンは、*HGW* が確立したリースのものだったのです。私のルーターはそれを一度も更新しませんでした。そもそも一度も持っていなかったからです。
 
-So: I had been riding an inherited binding the whole time. At expiry the subscriber session tore down upstream — which is why **RAs stopped**, not merely the tunnel. That was the observation that never fit any of my earlier theories, since RAs are unsolicited multicast and require no state on the client side. Reconnecting the HGW re-established the binding and restarted the same four-hour fuse.
+つまり、私はずっと引き継いだバインディングに乗っていたのです。期限が切れると、加入者セッションが上流で切断されました。これが、単にトンネルではなく **RA が止まった**理由です。RA は要求なしのマルチキャストでクライアント側の状態を必要としないので、これは私の以前のどの仮説にも当てはまらなかった観察でした。HGW をつなぎ直すとバインディングが再確立され、同じ 4 時間の導火線が再び始まりました。
 
-### Why the router never got its own lease
+### なぜルーターは自分のリースを一度も得られなかったのか
 
-`networkctl reconfigure enp4s0` with a capture running:
+キャプチャを走らせながら `networkctl reconfigure enp4s0`:
 
 ```
 1   0.000000 fe80::9a2c:... → ff02::1:2  DHCPv6 Solicit XID: 0x6f1749 CID: 000300030001982cc6XXXXXX
@@ -540,20 +540,20 @@ So: I had been riding an inherited binding the whole time. At expiry the subscri
 8 121.580047 ...
 ```
 
-Retransmit backoff at 1/2/4/8/16/32/64/128s with **zero Replies**. The server was ignoring an unrecognised client outright.
+1/2/4/8/16/32/64/128 秒で再送バックオフし、**Reply はゼロ**。サーバーは認識できないクライアントを完全に無視していました。
 
-Two defects, both in the client identity:
+欠陥は 2 つ、どちらもクライアントのアイデンティティにありました。
 
-**`CID: 000300030001982cc6XXXXXX` — 12 bytes with `0003` twice.** The DUID byte-layout trap from Part 3: I put the full 10-byte DUID into `DUIDRawData`, and networkd prepended its own type field.
+**`CID: 000300030001982cc6XXXXXX` — `0003` が 2 回ある 12 バイト。** 第 3 部の DUID バイト配置の罠です。完全な 10 バイトの DUID を `DUIDRawData` に入れてしまい、networkd が自分の type フィールドを前置したのです。
 
-**IAID mismatch.** I'd extracted the DUID and stopped, never noticing the HGW's `IAID: 00000001` sitting a few lines below it in the same Solicit. networkd hashes the interface name for its default. Bindings key on DUID **and** IAID.
+**IAID の不一致。** DUID を取り出したところで止めてしまい、同じ Solicit の数行下にある HGW の `IAID: 00000001` に気づいていませんでした。networkd は既定でインターフェース名をハッシュします。バインディングは DUID **と** IAID をキーにします。
 
-### The fix
+### 修正
 
 ```nix
 dhcpV6Config = {
   DUIDType = "link-layer";
-  DUIDRawData = "00:01:98:2c:c6:XX:XX:XX";   # 8 bytes, not 10
+  DUIDRawData = "00:01:98:2c:c6:XX:XX:XX";   # 10 バイトではなく 8 バイト
   IAID = 1;
   PrefixDelegationHint = "::/56";
   UseAddress = false;
@@ -562,7 +562,7 @@ dhcpV6Config = {
 };
 ```
 
-Verify before waiting four hours:
+4 時間待つ前に検証しましょう。
 
 ```sh
 sudo tcpdump -nn -i enp4s0 -w /tmp/v2.pcap 'udp port 546 or udp port 547' &
@@ -571,63 +571,63 @@ sleep 20 && sudo pkill tcpdump
 tshark -r /tmp/v2.pcap
 ```
 
-Success is `Solicit → Advertise → Request → Reply`, with `Length: 10` on the Client Identifier. Eight unanswered Solicits means you're still not being recognised.
+成功は `Solicit → Advertise → Request → Reply` で、Client Identifier が `Length: 10` になっていることです。応答のない Solicit が 8 回続くなら、まだ認識されていません。
 
-Afterwards, `journalctl -u systemd-networkd` finally mentions DHCPv6 at all, and `ip -6 addr show enp4s0` shows a dynamic entry alongside the static one. The router now holds its own lease and renews at T1 (7200s), so the four-hour fuse is gone.
+その後、`journalctl -u systemd-networkd` がようやく DHCPv6 に言及するようになり、`ip -6 addr show enp4s0` が静的なエントリと並んで動的なエントリを表示します。ルーターは自分のリースを保持し、T1（7200 秒）で更新するようになったので、4 時間の導火線は消えました。
 
-### A third bug the same logs exposed
+### 同じログが露わにした 3 つ目のバグ
 
 ```
 enp4s0: Interface name change detected, renamed to eth0.
 ```
 
-A leftover `.link` file from an earlier iteration was renaming the WAN interface. It hadn't broken anything yet — networkd kept matching on the old name — but `matchConfig.Name = "enp4s0"` would eventually have matched nothing at all. Check for and delete strays:
+以前の試行で残った `.link` ファイルが WAN インターフェースをリネームしていました。まだ何も壊してはいませんでした — networkd は古い名前でマッチし続けていたので — が、いずれ `matchConfig.Name = "enp4s0"` は何にもマッチしなくなっていたはずです。野良ファイルを確認して削除しましょう。
 
 ```sh
 ls -la /etc/systemd/network/*.link
 ```
 
-The MAC belongs in `[Link]` of the `.network`, as in Part 4.
+MAC は第 4 部のとおり、`.network` の `[Link]` に置きます。
 
-### The diagnostic lesson
+### 診断上の教訓
 
-**A static `address =` line makes your interface look configured when it isn't.**
+**静的な `address =` 行は、実際には設定されていないのにインターフェースが設定済みに見せかけます。**
 
-I spent hours reassured by `ip -6 addr show enp4s0` displaying my CE address, treating it as evidence that DHCPv6 had worked. It wasn't. That address is hardcoded in the `.network` file — networkd installs it whether or not a single DHCPv6 packet was ever answered. I was reading my own config back at myself.
+私は `ip -6 addr show enp4s0` が CE アドレスを表示するのを見て何時間も安心し、それを DHCPv6 が動いた証拠だと思い込んでいました。違いました。そのアドレスは `.network` ファイルにハードコードされていて — networkd は DHCPv6 パケットが 1 つでも応答されたかどうかに関係なくそれを設定します。私は自分の設定を自分に読み返していただけだったのです。
 
-The real signals are: a *second*, dynamic address with finite lifetimes; a delegated prefix in `networkctl status`; and DHCPv6 appearing in the journal at all. Its total absence from the logs should have been the first thing I chased, not the last.
+本当のシグナルはこうです。有限のライフタイムを持つ*2 つ目の*動的アドレス、`networkctl status` に現れる委任されたプレフィックス、そしてそもそもジャーナルに DHCPv6 が現れること。ログからの完全な欠落こそ、最後ではなく最初に追うべきものでした。
 
-Corollary worth internalising: **an outage anchored to another device's clock is not your bug's clock.** The first outage looked like 3 hours because I measured from my cutover; it was 4 hours from the HGW's last provisioning. Measuring from the wrong event sent me chasing T2 rebind timers that never applied.
+肝に銘じる価値のある系。**別のデバイスの時計に基準を置いた全断は、あなたのバグの時計ではありません。** 最初の全断が 3 時間に見えたのは、自分の切り替えから測っていたからです。実際には HGW の最後のプロビジョニングから 4 時間でした。間違ったイベントから測ったせいで、決して適用されない T2 の rebind タイマーを追いかける羽目になりました。
 
-## Part 10: The other unexplained thing
+## 第 10 部: もう一つの説明のつかない現象
 
-First activation: no connectivity. Reboot: everything works. Same generation, no config change.
+最初のアクティベーション: 疎通なし。再起動: すべて動く。同じ generation、設定変更なし。
 
-Most likely explanation: the `ip6tnl` netdev was created before `ceAddr` was configured on `enp4s0`. `ip6tnl` binds `local` at creation time, and networkd doesn't reliably order netdev creation after address configuration on the underlying link. So the tunnel came up sourcing from the wrong address (or nothing), and the BR ignored it. The reboot happened to serialise it correctly.
+最も可能性の高い説明: `ip6tnl` の netdev が、`enp4s0` に `ceAddr` が設定される前に作成された、というものです。`ip6tnl` は作成時に `local` をバインドしますが、networkd は netdev の作成を下位リンクのアドレス設定より後に順序付けるとは限りません。そのためトンネルが誤ったアドレス（あるいは何もなし）を送信元として上がってしまい、BR はそれを無視しました。再起動はたまたまそれを正しい順序に直列化しただけです。
 
-If that's the cause, it will recur on a cold boot with slow link negotiation. Check `ip -d link show sbtun` — if `local` isn't exactly your CE address, you're working by luck. The deterministic fix is likely:
+もしこれが原因なら、リンクのネゴシエーションが遅いコールドブートで再発します。`ip -d link show sbtun` を確認してください。`local` が CE アドレスと厳密に一致していなければ、運で動いているだけです。決定的な修正はおそらくこれです。
 
 ```nix
 systemd.network.netdevs."20-sbtun".tunnelConfig.Independent = true;
 ```
 
-which decouples tunnel creation from the underlying link's state. **Not yet verified** — test it on a `test` activation you can reboot out of.
+これはトンネルの作成を下位リンクの状態から切り離します。**まだ未検証**です。再起動で抜け出せる `test` アクティベーションで試してください。
 
-Alternative explanation: the HGW still held the BBIX session and the reboot simply bought elapsed time. Less likely given it was already unplugged, but it would produce identical symptoms with no config defect at all.
+別の説明: HGW がまだ BBIX のセッションを保持していて、再起動が単に経過時間を稼いだだけ、というものです。既に抜いてあったことを考えると可能性は低いですが、これなら設定上の欠陥が一切ないまま同一の症状を生み出しえます。
 
-## Caveats
+## 注意点
 
-- **You must keep renting the HGW — and keep it reachable.** IPv6高速ハイブリッド is bundled with the rental, so cancelling kills the service. But as Part 9 shows, it's also your only recovery mechanism: it's the one device that can re-establish the BR binding from scratch. Don't put it somewhere inconvenient.
-- **Budget for a multi-day debugging tail.** Mine took three distinct bugs to stabilise, one of which only revealed itself on a 4-hour cycle. Don't cut over the day before you need the connection.
-- **ひかり電話 / ホワイト光電話 stops working.** There's no way to keep the phone and bypass the router, since you can't have both devices on the ONU with the same cloned MAC.
-- **This is almost certainly outside SoftBank's terms.** They will not support it.
-- **Region matters.** Published reports are mostly 東日本 with an XG-100NE. I'm 西日本 with an EVO310G. The architecture is the same; the addresses are not. Capture your own.
-- **Firmware can change any of this.** The parameters are fetched dynamically by the HGW for a reason.
+- **HGW はレンタルし続け、しかも手の届く場所に置いておく必要があります。** IPv6高速ハイブリッド はレンタルに同梱されているので、解約するとサービスが死にます。しかも第 9 部が示すように、これは唯一の復旧手段でもあります。BR のバインディングをゼロから再確立できる唯一のデバイスなのです。不便な場所に置かないでください。
+- **何日にもわたるデバッグの尾を見込んでおきましょう。** 私の場合、安定するまでに 3 つの別々のバグがあり、そのうち一つは 4 時間周期でしか姿を現しませんでした。接続が必要になる前日に切り替えるのはやめましょう。
+- **ひかり電話 / ホワイト光電話 は使えなくなります。** 電話を残したままルーターをバイパスする方法はありません。同じクローン MAC を持つ 2 台のデバイスを ONU に同時につなぐことはできないからです。
+- **これはほぼ確実に SoftBank の規約の範囲外です。** サポートは受けられません。
+- **地域が重要です。** 公開されている報告はほとんどが XG-100NE の 東日本 のものです。私は EVO310G の 西日本 です。アーキテクチャは同じですが、アドレスは違います。自分でキャプチャしてください。
+- **ファームウェアはこれらのどれでも変えうります。** パラメータが HGW によって動的に取得されるのには理由があるのです。
 
-## References
+## 参考文献
 
-- [`makeding/luci-app-fleth`](https://github.com/makeding/luci-app-fleth) — OpenWrt helper; its ISP table is the clearest published statement that SoftBank is 固定IP/IPIP6, not MAP-E or DS-Lite
-- [Missing's Blog — SoftBank 光・10ギガ移除NTT路由器直接桥接ONU](https://blog.missing233.com/2023/08/13/softbank-hikari-research/) and [the follow-up config guide](https://blog.missing233.com/2023/09/16/softbank-hikari-openwrt-configuration/) — the original reverse-engineering, including the RADIUS VSA 204/207 decode and the 8-hour DHCPv6 problem
-- [zenn.dev/zyun — ソフトバンク光の10Gプラン](https://zenn.dev/zyun/scraps/d6d3781094804a) — packet capture showing plain IPIP despite the HGW's "MAP-E" label
-- [塩の惑星 — 大容量回線ソフトバンク光10GでIPv6,IPv4の自宅サーバ運用をしてみた](https://corkborg.github.io/home-server-with-softbank-hikari-10g/) — the dedicated-IPv4 finding, from the XG-100NE side
+- [`makeding/luci-app-fleth`](https://github.com/makeding/luci-app-fleth) — OpenWrt のヘルパー。その ISP 対応表は、SoftBank が MAP-E でも DS-Lite でもなく 固定IP/IPIP6 であるという、最も明確な公開情報です
+- [Missing's Blog — SoftBank 光・10ギガ移除NTT路由器直接桥接ONU](https://blog.missing233.com/2023/08/13/softbank-hikari-research/) と [設定ガイドの続編](https://blog.missing233.com/2023/09/16/softbank-hikari-openwrt-configuration/) — 元祖のリバースエンジニアリング。RADIUS VSA 204/207 のデコードと 8 時間の DHCPv6 問題を含みます
+- [zenn.dev/zyun — ソフトバンク光の10Gプラン](https://zenn.dev/zyun/scraps/d6d3781094804a) — HGW の「MAP-E」というラベルにもかかわらず素朴な IPIP を示すパケットキャプチャ
+- [塩の惑星 — 大容量回線ソフトバンク光10GでIPv6,IPv4の自宅サーバ運用をしてみた](https://corkborg.github.io/home-server-with-softbank-hikari-10g/) — 専有 IPv4 という発見。XG-100NE 側からのもの
 - [RFC 2473](https://datatracker.ietf.org/doc/html/rfc2473) — Generic Packet Tunneling in IPv6
